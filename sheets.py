@@ -99,6 +99,18 @@ def get_latest_checkins(limit: int = 20) -> list[dict]:
     return records[-limit:] if len(records) > limit else records
 
 
+def get_starting_weight(user_id: int) -> str | None:
+    """Return the starting weight from this user's most recent check-in, or None."""
+    ws = _get_sheet()
+    records = ws.get_all_records()
+    # Scan in reverse to find their latest entry
+    for record in reversed(records):
+        if str(record.get("User ID")) == str(user_id):
+            weight = record.get("Starting Weight", "").strip()
+            return weight if weight else None
+    return None
+
+
 def get_sheet_url() -> str:
     """Return a direct link to the spreadsheet."""
     client = _get_client()

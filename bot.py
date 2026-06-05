@@ -52,10 +52,15 @@ class CheckinModal(discord.ui.Modal, title="Weekly Fitness Check-in 💪"):
     )
     starting_weight = discord.ui.TextInput(
         label="Starting Weight",
-        placeholder="e.g. 200 lbs",
+        placeholder="e.g. 200 lbs (auto-filled after first check-in)",
         required=True,
         max_length=50,
     )
+
+    def __init__(self, known_starting_weight: str | None = None) -> None:
+        super().__init__()
+        if known_starting_weight:
+            self.starting_weight.default = known_starting_weight
     proud_of = discord.ui.TextInput(
         label="Proud of 🌟",
         placeholder="Something you accomplished this week",
@@ -175,7 +180,12 @@ bot = FitnessBot()
 # ── Slash commands ─────────────────────────────────────────────────────────────
 @bot.tree.command(name="checkin", description="Submit your weekly fitness check-in")
 async def checkin(interaction: discord.Interaction) -> None:
-    await interaction.response.send_modal(CheckinModal())
+    # Look up this user's starting weight from their most recent check-in
+    try:
+        known_starting = sheets.get_starting_weight(interaction.user.id)
+    except Exception:
+        known_starting = None
+    await interaction.response.send_modal(CheckinModal(known_starting_weight=known_starting))
 
 
 @bot.tree.command(name="summary", description="Show the latest check-ins for the group")
