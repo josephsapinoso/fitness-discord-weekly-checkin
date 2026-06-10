@@ -46,21 +46,16 @@ class CheckinModal(discord.ui.Modal, title="Weekly Fitness Check-in 💪"):
     )
     last_week_weight = discord.ui.TextInput(
         label="Last Week's Weight",
-        placeholder="e.g. 187 lbs",
+        placeholder="Auto-filled from your last check-in",
         required=True,
         max_length=50,
     )
     starting_weight = discord.ui.TextInput(
         label="Starting Weight",
-        placeholder="e.g. 200 lbs (auto-filled after first check-in)",
+        placeholder="Auto-filled from your first check-in",
         required=True,
         max_length=50,
     )
-
-    def __init__(self, known_starting_weight: str | None = None) -> None:
-        super().__init__()
-        if known_starting_weight:
-            self.starting_weight.default = known_starting_weight
     proud_of = discord.ui.TextInput(
         label="Proud of 🌟",
         placeholder="Something you accomplished this week",
@@ -75,6 +70,17 @@ class CheckinModal(discord.ui.Modal, title="Weekly Fitness Check-in 💪"):
         style=discord.TextStyle.paragraph,
         max_length=500,
     )
+
+    def __init__(
+        self,
+        known_starting_weight: str | None = None,
+        known_last_week_weight: str | None = None,
+    ) -> None:
+        super().__init__()
+        if known_starting_weight:
+            self.starting_weight.default = known_starting_weight
+        if known_last_week_weight:
+            self.last_week_weight.default = known_last_week_weight
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -180,12 +186,18 @@ bot = FitnessBot()
 # ── Slash commands ─────────────────────────────────────────────────────────────
 @bot.tree.command(name="checkin", description="Submit your weekly fitness check-in")
 async def checkin(interaction: discord.Interaction) -> None:
-    # Look up this user's starting weight from their most recent check-in
+    # Prefill starting weight (first check-in) and last week's weight (latest check-in)
     try:
-        known_starting = sheets.get_starting_weight(interaction.user.id)
-    except Exception:
-        known_starting = None
-    await interaction.response.send_modal(CheckinModal(known_starting_weight=known_starting))
+        known_starting, known_last_week = sheets.get_user_prefill(interaction.user.id)
+    except Exception as e:
+        log.warning("Could not fetch prefill data: %s", e)
+        known_starting, known_last_week = None, None
+    await interaction.response.send_modal(
+        CheckinModal(
+            known_starting_weight=known_starting,
+            known_last_week_weight=known_last_week,
+        )
+    )
 
 
 @bot.tree.command(name="summary", description="Show the latest check-ins for the group")
@@ -208,23 +220,26 @@ async def summary(interaction: discord.Interaction) -> None:
         description=f"{len(records)} most recent entries",
     )
     for r in records[-5:]:  # show last 5 in the embed
-        username = r.get("Username", "Unknown")
-        cur  = r.get("Current Weight", "—")
-        lw   = r.get("Last Week Weight", "—")
+        # gspread returns numeric cells as int/float — coerce everything to str
+        username = str(r.get("Username") or "Unknown")
+        cur  = str(r.get("Current Weight") or "—")
+        lw   = str(r.get("Last Week Weight") or "—")
+        proud = str(r.get("Proud Of") or "—")
+        work  = str(r.get("Can Work On") or "—")
         diff_str = ""
         try:
             diff = float("".join(c for c in cur if c.isdigit() or c == ".")) - \
                    float("".join(c for c in lw  if c.isdigit() or c == "."))
             diff_str = f" ({diff:+.1f})"
-        except ValueError:
+        except (ValueError, TypeError):
             pass
         embed.add_field(
-            name=username,
+            name=username[:256],
             value=(
                 f"**Weight:** {cur}{diff_str}\n"
-                f"**🌟** {r.get('Proud Of', '—')[:80]}\n"
-                f"**🎯** {r.get('Can Work On', '—')[:80]}"
-            ),
+                f"**🌟** {proud[:80]}\n"
+                f"**🎯** {work[:80]}"
+            )[:1024],
             inline=False,
         )
 
@@ -234,7 +249,11 @@ async def summary(interaction: discord.Interaction) -> None:
     except Exception:
         pass
 
-    await interaction.followup.send(embed=embed)
+    try:
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        log.error("Failed to send summary embed: %s", e)
+        await interaction.followup.send("⚠️ Could not render the summary embed.")
 
 
 @bot.tree.command(name="history", description="Link to the full check-in history spreadsheet")

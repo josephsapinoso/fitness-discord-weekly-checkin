@@ -99,16 +99,30 @@ def get_latest_checkins(limit: int = 20) -> list[dict]:
     return records[-limit:] if len(records) > limit else records
 
 
-def get_starting_weight(user_id: int) -> str | None:
-    """Return the starting weight from this user's most recent check-in, or None."""
+def get_user_prefill(user_id: int) -> tuple[str | None, str | None]:
+    """Return (starting_weight, last_week_weight) for a user.
+
+    starting_weight: from the user's FIRST check-in (its Starting Weight,
+                     falling back to its Current Weight).
+    last_week_weight: the Current Weight from the user's MOST RECENT check-in.
+
+    Note: gspread returns numeric cells as int/float, so values are coerced
+    to str before use.
+    """
     ws = _get_sheet()
     records = ws.get_all_records()
-    # Scan in reverse to find their latest entry
-    for record in reversed(records):
-        if str(record.get("User ID")) == str(user_id):
-            weight = record.get("Starting Weight", "").strip()
-            return weight if weight else None
-    return None
+    user_records = [r for r in records if str(r.get("User ID")) == str(user_id)]
+    if not user_records:
+        return None, None
+
+    def _clean(value) -> str | None:
+        s = str(value).strip()
+        return s if s else None
+
+    first, latest = user_records[0], user_records[-1]
+    starting = _clean(first.get("Starting Weight", "")) or _clean(first.get("Current Weight", ""))
+    last_week = _clean(latest.get("Current Weight", ""))
+    return starting, last_week
 
 
 def get_sheet_url() -> str:
