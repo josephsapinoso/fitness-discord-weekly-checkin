@@ -6,6 +6,7 @@ A Discord bot that posts weekly prompts, collects structured check-ins via a mod
 
 - `/checkin` — opens a modal with all 5 fields; posts a formatted embed to the channel and saves to Sheets
 - `/summary` — shows the last 5 check-ins in an embed with a link to the full sheet
+- `/progress` — your personal weight chart with All-Time / 6-Month / 30-Day buttons, overall loss, and pace (lbs/week trend); private by default, `share:true` posts it to the channel
 - `/history` — sends you the Google Sheet link privately
 - **Weekly reminder** — posts a prompt every Monday at 9 AM UTC (configurable)
 
@@ -85,5 +86,4 @@ python bot.py
 |------|-------|
 | Change reminder day/time | `REMINDER_WEEKDAY`, `REMINDER_HOUR`, `REMINDER_MINUTE` env vars |
 | Change sheet tab name | `GOOGLE_SHEET_TAB` env var |
-| Add/remove check-in fields | Edit `CheckinModal` in `bot.py` and `HEADERS` + `log_checkin()` in `sheets.py` |
-| Change embed colors/emoji | Edit `_build_checkin_embed()` in `bot.py` |
+|

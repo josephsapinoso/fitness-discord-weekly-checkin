@@ -125,6 +125,41 @@ def get_user_prefill(user_id: int) -> tuple[str | None, str | None]:
     return starting, last_week
 
 
+def parse_weight(value) -> float | None:
+    """Extract a numeric weight from a cell like '185 lbs' or 184.6."""
+    s = "".join(c for c in str(value) if c.isdigit() or c == ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def get_user_history(user_id: int) -> list[dict]:
+    """Return all of a user's check-ins, oldest first.
+
+    Each item: {"date": datetime (UTC), "weight": float}.
+    Rows with unparseable timestamps or weights are skipped.
+    """
+    ws = _get_sheet()
+    records = ws.get_all_records()
+    history: list[dict] = []
+    for r in records:
+        if str(r.get("User ID")) != str(user_id):
+            continue
+        try:
+            dt = datetime.strptime(
+                str(r.get("Timestamp", "")), "%Y-%m-%d %H:%M UTC"
+            ).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        weight = parse_weight(r.get("Current Weight"))
+        if weight is None:
+            continue
+        history.append({"date": dt, "weight": weight})
+    history.sort(key=lambda h: h["date"])
+    return history
+
+
 def get_sheet_url() -> str:
     """Return a direct link to the spreadsheet."""
     client = _get_client()

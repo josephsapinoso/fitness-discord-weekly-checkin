@@ -4,6 +4,7 @@ Fitness Discord Bot — weekly check-in facilitator.
 Commands:
   /checkin   — opens a modal to submit this week's check-in
   /summary   — posts the latest check-ins for the group
+  /progress  — your personal weight chart (all-time / 6 months / 30 days)
   /history   — link to the full Google Sheet
 
 Scheduling:
@@ -19,6 +20,7 @@ from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
 
+import charts
 import sheets
 
 load_dotenv()
@@ -254,6 +256,132 @@ async def summary(interaction: discord.Interaction) -> None:
     except Exception as e:
         log.error("Failed to send summary embed: %s", e)
         await interaction.followup.send("⚠️ Could not render the summary embed.")
+
+
+# ── /progress ──────────────────────────────────────────────────────────────────
+def _build_progress_payload(
+    history: list[dict], view: str, user: discord.User | discord.Member
+) -> tuple[discord.Embed, discord.File | None]:
+    """Build the embed + chart file for one view window."""
+    period = charts.filter_history(history, view)
+    stats = charts.compute_stats(history, period)
+    view_label = charts.VIEWS[view]["label"]
+
+    losing = stats["total_change"] <= 0
+    embed = discord.Embed(
+        title=f"📈 Progress — {user.display_name}",
+        color=discord.Color.green() if losing else discord.Color.orange(),
+    )
+
+    # Overall (all-time) stats — always shown so context never disappears
+    total = stats["total_change"]
+    total_arrow = "📉" if total < 0 else ("📈" if total > 0 else "➡️")
+    embed.add_field(name="🚀 Starting", value=f"{stats['starting']:.1f} lbs", inline=True)
+    embed.add_field(name="⚖️ Current", value=f"{stats['current']:.1f} lbs", inline=True)
+    embed.add_field(name="Overall", value=f"{total_arrow} {total:+.1f} lbs", inline=True)
+
+    # Period-specific stats
+    if len(period) >= 2:
+        pc = stats["period_change"]
+        pc_arrow = "📉" if pc < 0 else ("📈" if pc > 0 else "➡️")
+        embed.add_field(
+            name=f"{view_label} Change", value=f"{pc_arrow} {pc:+.1f} lbs", inline=True
+        )
+        pace = stats["pace_per_week"]
+        if pace is not None:
+            direction = "losing" if pace < 0 else ("gaining" if pace > 0 else "holding at")
+            embed.add_field(
+                name="Pace", value=f"{direction} {abs(pace):.2f} lbs/week", inline=True
+            )
+        embed.add_field(name="Check-ins", value=str(stats["checkins"]), inline=True)
+        chart_buf = charts.render_progress_chart(period, view, user.display_name)
+        file = discord.File(chart_buf, filename="progress.png")
+        embed.set_image(url="attachment://progress.png")
+    else:
+        embed.description = (
+            f"Not enough check-ins in the **{view_label}** window to chart — "
+            "showing overall stats only."
+        )
+        file = None
+
+    embed.set_footer(text="Pace is a trend over the selected window, not week-to-week.")
+    return embed, file
+
+
+class ProgressView(discord.ui.View):
+    """Buttons to switch between all-time / 6 months / 30 days."""
+
+    def __init__(self, history: list[dict], owner_id: int, current: str = "all") -> None:
+        super().__init__(timeout=300)
+        self.history = history
+        self.owner_id = owner_id
+        self.current = current
+        self._style_buttons()
+
+    def _style_buttons(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.style = (
+                    discord.ButtonStyle.primary
+                    if child.custom_id == self.current
+                    else discord.ButtonStyle.secondary
+                )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This is someone else's progress view — run `/progress` for your own!",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def _switch(self, interaction: discord.Interaction, view_key: str) -> None:
+        self.current = view_key
+        self._style_buttons()
+        embed, file = _build_progress_payload(self.history, view_key, interaction.user)
+        attachments = [file] if file else []
+        await interaction.response.edit_message(
+            embed=embed, attachments=attachments, view=self
+        )
+
+    @discord.ui.button(label="All-Time", custom_id="all")
+    async def all_time(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._switch(interaction, "all")
+
+    @discord.ui.button(label="6 Months", custom_id="6m")
+    async def six_months(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._switch(interaction, "6m")
+
+    @discord.ui.button(label="30 Days", custom_id="30d")
+    async def thirty_days(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._switch(interaction, "30d")
+
+
+@bot.tree.command(name="progress", description="Your personal weight progress chart")
+@app_commands.describe(share="Post publicly in the channel instead of just to you")
+async def progress(interaction: discord.Interaction, share: bool = False) -> None:
+    await interaction.response.defer(ephemeral=not share)
+    try:
+        history = sheets.get_user_history(interaction.user.id)
+    except Exception as e:
+        log.error("Failed to fetch user history: %s", e)
+        await interaction.followup.send("⚠️ Could not load your check-in history right now.")
+        return
+
+    if len(history) < 2:
+        await interaction.followup.send(
+            "You need at least **2 check-ins** to chart progress. "
+            "Log one with `/checkin` and check back next week! 💪"
+        )
+        return
+
+    embed, file = _build_progress_payload(history, "all", interaction.user)
+    view = ProgressView(history, owner_id=interaction.user.id)
+    kwargs = {"embed": embed, "view": view}
+    if file:
+        kwargs["file"] = file
+    await interaction.followup.send(**kwargs)
 
 
 @bot.tree.command(name="history", description="Link to the full check-in history spreadsheet")
