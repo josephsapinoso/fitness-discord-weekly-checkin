@@ -49,6 +49,22 @@ Also added `--cpu-boost`: a cold start measured **3.006 s** against Discord's
 - [ ] A **Photos** tab has appeared in the Google Sheet
 - [ ] `/checkin` with **no** photo still works exactly as before
 
-The unchecked items need a real submission: a genuine weight and a real progress
-photo, posted permanently to the group channel. That's yours to run — see the
-rollback command above if anything looks wrong.
+**Done** — you ran this on 2026-07-24. Verified: check-in row 16 logged with Starting
+Weight 201 (derived from the sheet, not asked for), `Photos` tab created with consent
+recorded and `Day1 Ref` set, Day 1 photo posted.
+
+## 5. Create the photo archive channel — **outstanding**
+
+`/collage` and `/photo-replace` are deployed (revision `fitness-checkin-bot-00004-72n`)
+but inert until they have somewhere to retain raw photos. Until then they reply
+"photo history isn't set up"; everything else works normally.
+
+1. Create a **private text channel** (e.g. `#photo-archive`) that only the bot can
+   see and post in.
+2. Copy its channel ID (right-click → Copy Channel ID, Developer Mode on).
+3. Add `ARCHIVE_CHANNEL_ID: "<id>"` to `env.yaml` and redeploy with
+   `./scripts/redeploy.sh`.
+
+Note: photo history starts from that moment. Photos submitted before the archive
+existed were never retained as individual images — only the before/after composites
+were ever uploaded — so there is nothing to backfill.
