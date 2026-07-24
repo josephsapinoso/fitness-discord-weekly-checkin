@@ -1,38 +1,43 @@
-# TODO — remaining deploy steps for the progress-photos feature
+# TODO — progress-photos feature
 
-The code and docs are merged and the test suite passes (85/85). These two steps push
-the change to the live bot and can't be completed from the current environment. Full
-procedure: [docs/REDEPLOY_CHECKLIST.md](docs/REDEPLOY_CHECKLIST.md).
+Steps 1 and 2 are **done** (2026-07-23). Full procedure, for reference or a future
+redeploy: [docs/REDEPLOY_CHECKLIST.md](docs/REDEPLOY_CHECKLIST.md).
 
-## 1. Deploy to Cloud Run
+## ~~1. Deploy to Cloud Run~~ — done
 
-`gcloud` is not installed on this machine, so `gcloud run deploy` / `scripts/redeploy.sh`
-can't run here. Two options:
+Deployed via `scripts/redeploy.sh` after installing the gcloud CLI locally
+(`winget install --id Google.CloudSDK -e`).
 
-- **(a) Install the gcloud CLI locally** — install from
-  <https://cloud.google.com/sdk/docs/install>, then:
-  ```bash
-  gcloud auth login
-  gcloud config set project <project>
-  ./scripts/redeploy.sh
-  ```
-- **(b) Deploy from Cloud Shell in the browser** — gcloud and auth are already present
-  there. Paste the contents of `deploy_cloudshell.sh` (repo root) into
-  <https://shell.cloud.google.com>. It is gitignored because it embeds secrets, so
-  it will **not** be in the copy Cloud Shell clones — you have to paste it.
+- Revision **`fitness-checkin-bot-00002-sh6`**, serving 100% of traffic
+- Previous revision (pre-photos, rollback target): `fitness-checkin-bot-00001-fgk`
+- Health check: `curl https://fitness-checkin-bot-lpt4hrhaua-uw.a.run.app/` → `ok`
 
-After deploying, health-check: `curl https://YOUR-SERVICE-URL/` should return `ok`.
+## ~~2. Register slash commands~~ — done
 
-## 2. Register slash commands
+`.env` now carries `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`, `TASK_SECRET`,
+`TASKS_LOCATION`, and `TASKS_QUEUE` (synced from `env.yaml`), so it matches
+`.env.example`. `register_commands.py` registered **5** commands, confirmed against
+the live Discord API: `/checkin`, `/summary`, `/history`, `/progress` (share),
+`/day1` (photo attachment).
 
-`.env` is missing `DISCORD_APPLICATION_ID` (the value is already in `env.yaml`).
+## 3. Grant Discord permissions — **still outstanding, manual**
 
-1. Add `DISCORD_APPLICATION_ID=<value from env.yaml>` to `.env`.
-2. Run `python register_commands.py`.
-3. Verify it prints **5** commands (checkin, summary, progress, history, day1) — if it
-   shows fewer, `/day1` won't appear in Discord.
+The bot needs **Attach Files** and **Read Message History** in the check-in channel.
+Without both, the text check-in still posts but **photos silently fail**. Either set
+them on the channel/role in the Discord app, or re-invite with the corrected bitmask:
 
-## 3. Grant Discord permissions (manual, handled by the user)
+```
+https://discord.com/oauth2/authorize?client_id=1512317224180781119&scope=bot+applications.commands&permissions=2147600384
+```
 
-The bot needs **Attach Files** and **Read Message History** in the check-in channel, or
-photos silently fail. See REDEPLOY_CHECKLIST.md step 5.
+`2147600384` = Send Messages + Embed Links + Attach Files + Read Message History +
+Use Application Commands.
+
+## 4. Smoke test in Discord — **still outstanding**
+
+- [ ] `/checkin` → the modal shows a **"Progress photo (optional)"** upload field
+- [ ] Attach a photo + submit → one-time **"Share it 📸"** opt-in → tapping it posts a
+      **Day 1** message to the channel
+- [ ] A second `/checkin` with a photo → a **Before & After** composite posts
+- [ ] A **Photos** tab has appeared in the Google Sheet
+- [ ] `/checkin` with **no** photo still works exactly as before
