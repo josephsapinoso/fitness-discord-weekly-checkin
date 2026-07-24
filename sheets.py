@@ -3,6 +3,13 @@ Google Sheets storage for fitness check-ins.
 
 Sheet columns: timestamp, user_id, username, current_weight, last_week_weight,
                starting_weight, proud_of, can_work_on
+
+Credentials are resolved in this order:
+  1. GOOGLE_CREDENTIALS_JSON env var (full service-account JSON — recommended)
+  2. GOOGLE_CREDENTIALS_FILE path (local development)
+  3. Application Default Credentials (e.g. the Cloud Run runtime service
+     account — only works if that account has been granted Sheets access
+     and the token carries a Sheets-accepted scope)
 """
 
 import os
@@ -30,17 +37,18 @@ HEADERS = [
 
 
 def _get_client() -> gspread.Client:
-    """Build an authenticated gspread client from env vars."""
+    """Build an authenticated gspread client."""
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    creds_file = os.environ.get("GOOGLE_CREDENTIALS_FILE", "credentials.json")
     if creds_json:
         info = json.loads(creds_json)
         creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    elif os.path.exists(creds_file):
+        creds = Credentials.from_service_account_file(creds_file, scopes=SCOPES)
     else:
-        # Fall back to a local file for development
-        creds = Credentials.from_service_account_file(
-            os.environ.get("GOOGLE_CREDENTIALS_FILE", "credentials.json"),
-            scopes=SCOPES,
-        )
+        import google.auth
+
+        creds, _ = google.auth.default(scopes=SCOPES)
     return gspread.authorize(creds)
 
 
@@ -161,8 +169,5 @@ def get_user_history(user_id: int) -> list[dict]:
 
 
 def get_sheet_url() -> str:
-    """Return a direct link to the spreadsheet."""
-    client = _get_client()
-    spreadsheet_id = os.environ["GOOGLE_SHEET_ID"]
-    spreadsheet = client.open_by_key(spreadsheet_id)
-    return spreadsheet.url
+    """Direct link to the spreadsheet (no API call needed)."""
+    return f"https://docs.google.com/spreadsheets/d/{os.environ['GOOGLE_SHEET_ID']}"

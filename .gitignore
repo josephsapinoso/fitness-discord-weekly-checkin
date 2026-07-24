@@ -1,5 +1,9 @@
 __pycache__/
 *.pyc
 .env
+env.yaml
+deploy_cloudshell.sh
 credentials.json
 github_setup.py
+create_env.py
+_to_delete/
