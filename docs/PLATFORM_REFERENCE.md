@@ -38,8 +38,8 @@ This document explains every platform, service, and library used in this project
 **Role in this project:** The user interface. Members interact with the bot entirely within Discord — no separate app or website is needed. The bot lives in a private server channel dedicated to fitness check-ins.
 
 **Key concepts used:**
-- **Slash commands** (`/checkin`, `/summary`, `/history`): Registered commands that Discord surfaces with autocomplete in the chat input. Unlike message-based commands, slash commands are first-class Discord features with built-in discovery.
-- **Modals**: Pop-up forms that Discord renders natively in the client when triggered by a command. Used here to collect all 5 check-in fields in one structured interaction.
+- **Slash commands** (`/checkin`, `/summary`, `/history`, `/day1`): Registered commands that Discord surfaces with autocomplete in the chat input. Unlike message-based commands, slash commands are first-class Discord features with built-in discovery.
+- **Modals**: Pop-up forms that Discord renders natively in the client when triggered by a command. Used here to collect all 5 check-in fields in one structured interaction, plus an optional File Upload component (type 19) for a progress photo.
 - **Embeds**: Richly formatted message cards with titles, fields, colors, and thumbnails. Used to display formatted check-in summaries.
 - **Gateway API**: A persistent WebSocket connection between the bot and Discord's servers. The bot stays connected and receives real-time events (slash command invocations, etc.) over this connection.
 

@@ -112,12 +112,19 @@ modal = resp.get_json()
 check("checkin → modal type 9", modal["type"] == 9)
 check("modal custom_id", modal["data"]["custom_id"] == "checkin_modal")
 rows = modal["data"]["components"]
-check("modal has 5 inputs", len(rows) == 5)
-inputs = {r["components"][0]["custom_id"]: r["components"][0] for r in rows}
+check("modal has 5 text inputs + photo upload", len(rows) == 6)
+inputs = {r["components"][0]["custom_id"]: r["components"][0] for r in rows if "components" in r}
 check("prefill last week", inputs["last_week_weight"].get("value") == "190 lbs")
 check("prefill starting", inputs["starting_weight"].get("value") == "200 lbs")
 check("current not prefilled", "value" not in inputs["current_weight"])
 check("paragraph styles", inputs["proud_of"]["style"] == 2 and inputs["can_work_on"]["style"] == 2)
+photo_row = next(r for r in rows if r.get("type") == 18)
+check(
+    "photo upload component",
+    photo_row["component"]["type"] == 19
+    and photo_row["component"]["custom_id"] == "progress_pic"
+    and photo_row["component"]["required"] is False,
+)
 
 # Slow prefill: modal must still open (without values) inside the time budget
 def slow_prefill(uid):
@@ -129,7 +136,11 @@ t0 = time.time()
 resp = signed_post(cmd_interaction("checkin"))
 elapsed = time.time() - t0
 modal = resp.get_json()
-rows = {r["components"][0]["custom_id"]: r["components"][0] for r in modal["data"]["components"]}
+rows = {
+    r["components"][0]["custom_id"]: r["components"][0]
+    for r in modal["data"]["components"]
+    if "components" in r
+}
 check("slow prefill → modal within budget", modal["type"] == 9 and elapsed < 2.0, f"{elapsed:.2f}s")
 check("slow prefill → no values", "value" not in rows["last_week_weight"])
 
@@ -353,8 +364,199 @@ check(
 import register_commands
 
 names = [c["name"] for c in register_commands.COMMANDS]
-check("4 commands registered", names == ["checkin", "summary", "progress", "history"])
+check("5 commands registered", names == ["checkin", "summary", "progress", "history", "day1"])
 share_opt = register_commands.COMMANDS[2]["options"][0]
 check("share option is boolean+optional", share_opt["type"] == 5 and share_opt["required"] is False)
+day1_opt = register_commands.COMMANDS[4]["options"][0]
+check("day1 photo option is attachment+required", day1_opt["type"] == 11 and day1_opt["required"] is True)
+
+
+# ── 10. Progress photos: modal upload, /day1, consent, before/after ────────────
+from PIL import Image as _PILImage  # noqa: E402
+
+_pb = io.BytesIO()
+_PILImage.new("RGB", (8, 8), (100, 130, 160)).save(_pb, format="PNG")
+TINY_PNG = _pb.getvalue()
+
+# Modal submit carrying a photo → checkin_submit task gets the resolved URL
+modal_photo = {
+    "type": 5,
+    "token": "tok-photo",
+    "member": {"user": USER, "nick": "Joey"},
+    "data": {
+        "custom_id": "checkin_modal",
+        "components": [
+            {"components": [{"type": 4, "custom_id": "current_weight", "value": "185 lbs"}]},
+            {"components": [{"type": 4, "custom_id": "last_week_weight", "value": "186.2"}]},
+            {"components": [{"type": 4, "custom_id": "starting_weight", "value": "200"}]},
+            {"components": [{"type": 4, "custom_id": "proud_of", "value": "Ran 3x"}]},
+            {"components": [{"type": 4, "custom_id": "can_work_on", "value": "Sleep"}]},
+            {"type": 18, "component": {"type": 19, "custom_id": "progress_pic", "values": ["att-1"]}},
+        ],
+        "resolved": {"attachments": {"att-1": {"id": "att-1", "url": "https://cdn/att-1.png"}}},
+    },
+}
+enqueued.clear()
+signed_post(modal_photo)
+task = enqueued[-1][0]
+check("modal photo → photo_url resolved", task["photo_url"] == "https://cdn/att-1.png")
+check(
+    "modal photo → text values intact, file skipped",
+    task["values"]["current_weight"] == "185 lbs" and "progress_pic" not in task["values"],
+)
+
+# Modal submit WITHOUT a photo → photo_url is None (existing flow unaffected)
+no_photo = json.loads(json.dumps(modal_photo))
+no_photo["data"]["components"] = no_photo["data"]["components"][:5]
+no_photo["data"].pop("resolved")
+enqueued.clear()
+signed_post(no_photo)
+check("modal no photo → photo_url None", enqueued[-1][0]["photo_url"] is None)
+
+# /day1 command → set_baseline enqueued with the resolved attachment
+day1_cmd = {
+    "type": 2,
+    "token": "tok-day1",
+    "member": {"user": USER, "nick": None},
+    "data": {
+        "name": "day1",
+        "options": [{"name": "photo", "type": 11, "value": "att-9"}],
+        "resolved": {"attachments": {"att-9": {"id": "att-9", "url": "https://cdn/att-9.png"}}},
+    },
+}
+enqueued.clear()
+resp = signed_post(day1_cmd)
+check("day1 → ephemeral defer", resp.get_json() == {"type": 5, "data": {"flags": 64}})
+check(
+    "day1 enqueued set_baseline",
+    enqueued[-1][0]["kind"] == "set_baseline" and enqueued[-1][0]["photo_url"] == "https://cdn/att-9.png",
+)
+
+# Consent button → grant_consent enqueued (owner only)
+enqueued.clear()
+resp = signed_post(
+    {"type": 3, "token": "tok-consent", "member": {"user": USER, "nick": None},
+     "data": {"custom_id": "photo_consent:42", "component_type": 2}}
+)
+check("consent button → deferred update", resp.get_json()["type"] == 6)
+check("consent enqueued grant_consent", enqueued[-1][0]["kind"] == "grant_consent")
+
+resp = signed_post(
+    {"type": 3, "token": "tok-consent", "member": {"user": {**USER, "id": "777"}, "nick": None},
+     "data": {"custom_id": "photo_consent:42", "component_type": 2}}
+)
+check("consent button (not owner) → ignored", resp.get_json()["type"] == 6 and enqueued[-1][0]["kind"] == "grant_consent")
+
+# ── Photo /process tasks — stub Sheet photo-state and Discord image IO ──────────
+photo_state = {"consent": False, "day1_ref": None, "pending_url": None}
+
+
+def fake_get_photo_state(uid):
+    s = dict(photo_state)
+    s["day1_ref"] = s["day1_ref"] or None
+    s["pending_url"] = s["pending_url"] or None
+    return s
+
+
+upserts: list = []
+
+
+def fake_upsert(uid, username, **fields):
+    upserts.append((uid, username, dict(fields)))
+    for k, v in fields.items():
+        photo_state[k] = v
+
+
+sheets.get_photo_state = fake_get_photo_state
+sheets.upsert_photo_state = fake_upsert
+sheets.log_checkin = lambda **kw: None
+
+
+def fake_post(cid, payload, file_buf=None, filename="progress.png"):
+    calls["post"].append((cid, payload, file_buf, filename))
+    return {"id": "stored-1", "timestamp": "2026-01-02T00:00:00+00:00",
+            "attachments": [{"url": "https://cdn/stored-1.png"}]}
+
+
+discord_api.post_channel_message = fake_post
+discord_api.edit_original_response = (
+    lambda token, payload, file_buf=None, filename="progress.png": calls["edit"].append((token, payload, file_buf))
+)
+discord_api.download_image = lambda url: TINY_PNG
+discord_api.get_message = lambda cid, mid: {
+    "id": mid, "timestamp": "2026-01-01T00:00:00+00:00",
+    "attachments": [{"url": "https://cdn/day1-fresh.png"}],
+}
+app_module.discord_api = discord_api
+
+
+def checkin_photo_payload():
+    return {
+        "kind": "checkin_submit", "token": "tok-modal", "user": USER, "member_nick": "Joey",
+        "username": "joe", "photo_url": "https://cdn/att-1.png",
+        "values": {"current_weight": "185 lbs", "last_week_weight": "186.2", "starting_weight": "200",
+                   "proud_of": "Ran 3x", "can_work_on": "Sleep"},
+    }
+
+
+def upsert_fields():
+    return [f for (_, _, f) in upserts]
+
+
+# (a) photo + NOT consented → only the text embed posts; pending stashed; consent button
+photo_state.update({"consent": False, "day1_ref": None, "pending_url": None})
+calls["post"].clear(); calls["edit"].clear(); upserts.clear()
+client.post("/process", json=checkin_photo_payload(), headers={"X-Task-Secret": "s3cret"})
+check("unconsented photo → only text embed posted", len(calls["post"]) == 1
+      and calls["post"][0][1]["embeds"][0]["title"].startswith("Weekly Check-in"))
+check("unconsented photo → pending stashed", any(f.get("pending_url") == "https://cdn/att-1.png" for f in upsert_fields()))
+check("unconsented photo → consent button shown",
+      calls["edit"][-1][1]["components"][0]["components"][0]["custom_id"] == "photo_consent:42")
+
+# (b) grant consent → posts pending as Day 1 (no baseline yet); records consent + ref; clears pending
+photo_state.update({"consent": False, "day1_ref": None, "pending_url": "https://cdn/att-1.png"})
+calls["post"].clear(); calls["edit"].clear(); upserts.clear()
+client.post("/process", json={"kind": "grant_consent", "token": "tok-c", "user": USER,
+                              "member_nick": None, "username": "joe"}, headers={"X-Task-Secret": "s3cret"})
+check("grant consent → Day 1 posted", len(calls["post"]) == 1
+      and calls["post"][0][1]["embeds"][0]["title"].startswith("📸 Day 1"))
+check("grant consent → real PNG uploaded",
+      calls["post"][0][2] is not None and calls["post"][0][2].getvalue()[:8] == b"\x89PNG\r\n\x1a\n")
+check("grant consent → consent recorded", any(f.get("consent") is True for f in upsert_fields()))
+check("grant consent → day1_ref stored", any(f.get("day1_ref") == "stored-1" for f in upsert_fields()))
+check("grant consent → pending cleared", any(f.get("pending_url") == "" for f in upsert_fields()))
+check("grant consent → ephemeral confirm", "Shared" in calls["edit"][-1][1]["content"])
+
+# (c) check-in photo + consented + HAS baseline → text embed + before/after composite
+photo_state.update({"consent": True, "day1_ref": "day1-msg", "pending_url": None})
+calls["post"].clear(); calls["edit"].clear()
+client.post("/process", json=checkin_photo_payload(), headers={"X-Task-Secret": "s3cret"})
+check("consented w/ baseline → text + composite posted", len(calls["post"]) == 2)
+_ba = calls["post"][1]
+check("before/after embed + filename", _ba[1]["embeds"][0]["title"].startswith("🔥 Before & After")
+      and _ba[3] == "beforeafter.png")
+check("before/after real PNG", _ba[2] is not None and _ba[2].getvalue()[:8] == b"\x89PNG\r\n\x1a\n")
+check("consented photo confirm", "photo" in calls["edit"][-1][1]["content"])
+
+# (d) /day1 consented → posts Day 1 and overwrites the stored reference
+photo_state.update({"consent": True, "day1_ref": "old-ref", "pending_url": None})
+calls["post"].clear(); calls["edit"].clear(); upserts.clear()
+client.post("/process", json={"kind": "set_baseline", "token": "tok-b", "user": USER, "member_nick": None,
+                              "username": "joe", "photo_url": "https://cdn/att-9.png"},
+            headers={"X-Task-Secret": "s3cret"})
+check("set_baseline → Day 1 posted", len(calls["post"]) == 1
+      and calls["post"][0][1]["embeds"][0]["title"].startswith("📸 Day 1"))
+check("set_baseline → ref overwritten", any(f.get("day1_ref") == "stored-1" for f in upsert_fields()))
+check("set_baseline → confirm", "Day 1 photo saved" in calls["edit"][-1][1]["content"])
+
+# (e) /day1 NOT consented → nothing posts publicly; pending stashed + consent button
+photo_state.update({"consent": False, "day1_ref": None, "pending_url": None})
+calls["post"].clear(); calls["edit"].clear(); upserts.clear()
+client.post("/process", json={"kind": "set_baseline", "token": "tok-b2", "user": USER, "member_nick": None,
+                              "username": "joe", "photo_url": "https://cdn/att-9.png"},
+            headers={"X-Task-Secret": "s3cret"})
+check("set_baseline unconsented → no public post", len(calls["post"]) == 0)
+check("set_baseline unconsented → consent button",
+      calls["edit"][-1][1]["components"][0]["components"][0]["custom_id"] == "photo_consent:42")
 
 print(f"\nAll {PASS} checks passed ✅")

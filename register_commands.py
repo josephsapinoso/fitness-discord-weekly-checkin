@@ -33,6 +33,18 @@ COMMANDS = [
         ],
     },
     {"name": "history", "description": "Link to the full check-in history spreadsheet"},
+    {
+        "name": "day1",
+        "description": "Set your Day 1 baseline photo for before/after comparisons",
+        "options": [
+            {
+                "type": 11,  # attachment
+                "name": "photo",
+                "description": "Your starting progress photo",
+                "required": True,
+            }
+        ],
+    },
 ]
 
 

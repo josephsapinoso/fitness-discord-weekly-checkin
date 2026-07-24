@@ -153,9 +153,13 @@ REMINDER_MINUTE=0
 ## Step 7 — Verify the Bot is Working
 
 1. Open Discord and go to your check-in channel.
-2. Type `/checkin` — a modal with 5 fields should appear.
+2. Type `/checkin` — a modal with 5 fields plus an optional progress-photo upload should appear.
 3. Fill it in and submit — a formatted embed should post to the channel.
 4. Check your Google Sheet — a new row should appear under the `Check-ins` tab.
+5. (Optional) Attach a photo when checking in, or run `/day1` — the first time,
+   the bot asks you to confirm public sharing; after that it posts your Day 1
+   photo and, on later check-ins, a Day 1 → Now before/after image. Per-user
+   photo state is tracked in the `Photos` tab.
 
 ---
 
@@ -167,7 +171,9 @@ REMINDER_MINUTE=0
 | `CHECKIN_CHANNEL_ID` | Discord channel ID for the check-in channel | `1457444714528772176` |
 | `GOOGLE_SHEET_ID` | Spreadsheet ID from the Google Sheets URL | `1Gva...` |
 | `GOOGLE_SHEET_TAB` | Tab name inside the spreadsheet | `Check-ins` |
+| `GOOGLE_PHOTOS_TAB` | Tab name for per-user progress-photo state (auto-created) | `Photos` |
 | `GOOGLE_CREDENTIALS_JSON` | Full service account credentials JSON (single line) | `{"type":"service_account",...}` |
+| `MAX_IMAGE_BYTES` | Max inbound progress-photo size (bytes) | `10485760` |
 | `REMINDER_WEEKDAY` | Day of week for weekly prompt (0=Mon, 6=Sun) | `0` |
 | `REMINDER_HOUR` | UTC hour for the weekly reminder | `9` |
 | `REMINDER_MINUTE` | UTC minute for the weekly reminder | `0` |
