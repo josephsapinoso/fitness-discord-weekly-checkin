@@ -15,6 +15,11 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+# Check names contain arrows and emoji. Windows consoles default to cp1252 and
+# raise UnicodeEncodeError on the first one; CI (Linux) is already UTF-8.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(HERE, "stubs"))
