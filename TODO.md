@@ -20,24 +20,35 @@ Deployed via `scripts/redeploy.sh` after installing the gcloud CLI locally
 the live Discord API: `/checkin`, `/summary`, `/history`, `/progress` (share),
 `/day1` (photo attachment).
 
-## 3. Grant Discord permissions — **still outstanding, manual**
+## ~~3. Grant Discord permissions~~ — already in place
 
-The bot needs **Attach Files** and **Read Message History** in the check-in channel.
-Without both, the text check-in still posts but **photos silently fail**. Either set
-them on the channel/role in the Discord app, or re-invite with the corrected bitmask:
+Verified against the Discord API, not by eye. In **No Don't Eat The Cake** →
+`#✅weekly-checkins`, the `Fitness Check-in Bot` role already has Send Messages,
+Embed Links, **Attach Files**, and **Read Message History** (computed from
+`@everyone` + role + channel overwrites; no Administrator shortcut). Nothing to do.
 
-```
-https://discord.com/oauth2/authorize?client_id=1512317224180781119&scope=bot+applications.commands&permissions=2147600384
-```
+## ~~3b. Modal was broken~~ — found by the smoke test, fixed
 
-`2147600384` = Send Messages + Embed Links + Attach Files + Read Message History +
-Use Application Commands.
+`/checkin` failed for **everyone** with "The application did not respond". The
+progress-photos change had pushed the modal to **6** top-level components; Discord
+allows *"Between 1 and 5 (inclusive)"* and discarded the payload, while Cloud Run
+logged a healthy 200. Fixed in `c026815`: Starting Weight dropped from the modal and
+recovered server-side from the sheet. Deployed as revision
+**`fitness-checkin-bot-00003-7jn`**.
 
-## 4. Smoke test in Discord — **still outstanding**
+Also added `--cpu-boost`: a cold start measured **3.006 s** against Discord's
+**3.000 s** deadline, eating the first interaction after idle. Now **1.866 s** cold.
 
-- [ ] `/checkin` → the modal shows a **"Progress photo (optional)"** upload field
+## 4. Smoke test in Discord — partially done
+
+- [x] `/checkin` → modal shows all 5 fields including **"Progress photo (optional)"**,
+      with Last Week's Weight prefilled from the sheet
 - [ ] Attach a photo + submit → one-time **"Share it 📸"** opt-in → tapping it posts a
       **Day 1** message to the channel
 - [ ] A second `/checkin` with a photo → a **Before & After** composite posts
 - [ ] A **Photos** tab has appeared in the Google Sheet
 - [ ] `/checkin` with **no** photo still works exactly as before
+
+The unchecked items need a real submission: a genuine weight and a real progress
+photo, posted permanently to the group channel. That's yours to run — see the
+rollback command above if anything looks wrong.
