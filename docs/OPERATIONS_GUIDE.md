@@ -199,7 +199,8 @@ If you ever approach the limit, the **Metrics tab** in the service shows memory 
 The bot is invited with only the permissions it needs:
 - Send Messages
 - Embed Links
-- Read Message History
+- Attach Files (upload progress photos)
+- Read Message History (re-fetch the Day 1 photo for before/after)
 - Use Application Commands
 
 Avoid granting Administrator permission — it's unnecessary and increases risk.

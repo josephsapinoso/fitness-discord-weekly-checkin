@@ -6,11 +6,29 @@ free tier ($0/month)** as a Discord HTTP interactions endpoint — no always-on 
 
 ## Features
 
-- `/checkin` — opens a modal with all 5 fields; posts a formatted embed to the channel and saves to Sheets
+- `/checkin` — opens a modal with all 5 fields **plus an optional progress photo**; posts a formatted embed to the channel and saves to Sheets
+- `/day1` — set (or replace) your "Day 1" baseline photo, used for before/after comparisons
 - `/summary` — shows the last 5 check-ins in an embed with a link to the full sheet
 - `/progress` — your personal weight chart with All-Time / 6-Month / 30-Day buttons, overall loss, and pace (lbs/week trend); private by default, `share:true` posts it to the channel
 - `/history` — sends you the Google Sheet link privately
 - **Weekly reminder** — Cloud Scheduler posts a prompt every Monday at 9 AM UTC (configurable, no redeploy needed)
+
+### Progress photos & before/after
+
+Attach a photo to your `/checkin` (or set one with `/day1`) and the bot posts a
+**Day 1 → Now** comparison to the channel so everyone can see your before/after.
+
+- **One-time opt-in:** the first time you attach a photo the bot asks you to
+  confirm (privately) before anything is shared publicly — your text check-in
+  still posts as usual. Nothing is posted until you tap **Share it**.
+- **Day 1 is automatic** the first time you share a photo; `/day1` sets or
+  replaces it explicitly. Every later photo is composited against Day 1.
+- **Privacy:** EXIF/GPS metadata is stripped from every photo, uploads are size-
+  capped, and the private Google Sheet stores only Discord message references —
+  never image bytes or expiring URLs. Photos live in your check-in channel, so
+  keep that channel restricted to your group. There is no automated deletion:
+  to remove someone's photos, delete the messages in Discord and clear their row
+  in the **Photos** sheet tab.
 
 ## Architecture
 
@@ -44,7 +62,7 @@ commands work.
 4. On **General Information**, copy **Application ID** → `DISCORD_APPLICATION_ID`
    and **Public Key** → `DISCORD_PUBLIC_KEY`
 5. Under **OAuth2 → URL Generator**, select scopes: `bot`, `applications.commands`
-6. Under **Bot Permissions**, select: `Send Messages`, `Embed Links`, `Use Slash Commands`
+6. Under **Bot Permissions**, select: `Send Messages`, `Embed Links`, `Use Slash Commands`, `Attach Files` (to upload progress photos), and `Read Message History` (to re-fetch the Day 1 photo for before/after comparisons)
 7. Open the generated URL and invite the bot to your server
 8. Enable **Developer Mode** in Discord (User Settings → Advanced) then right-click your check-in channel → **Copy ID** → this is `CHECKIN_CHANNEL_ID`
 
@@ -88,8 +106,9 @@ Endpoint URL — usually it's easier to just deploy.
 ├── app.py                 # Flask interactions server — commands, modal, embeds
 ├── discord_api.py         # Discord REST helpers (webhook edits, channel posts)
 ├── tasks_queue.py         # Cloud Tasks enqueue helper (deferred work)
-├── sheets.py              # Google Sheets read/write helpers
+├── sheets.py              # Google Sheets read/write helpers (check-ins + photo state)
 ├── charts.py              # /progress chart rendering + stats
+├── images.py              # progress-photo normalize + before/after compositing
 ├── register_commands.py   # One-time slash-command registration
 ├── Dockerfile             # Cloud Run container
 ├── requirements.txt

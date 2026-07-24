@@ -21,6 +21,7 @@ Commands (unchanged from the gateway version):
 """
 
 import concurrent.futures
+import io
 import json
 import logging
 import os
@@ -129,6 +130,54 @@ def _build_checkin_embed(
             {"name": "🎯 Can Work On", "value": can_work_on, "inline": False},
         ],
         "footer": {"text": "Keep it up! 💪"},
+    }
+
+
+def _build_day1_embed(user: dict, member: dict | None, date_str: str) -> dict:
+    return {
+        "title": f"📸 Day 1 — {discord_api.display_name(user, member)}",
+        "description": f"Starting photo set on **{date_str}**. Every journey begins somewhere! 💪",
+        "color": discord_api.COLOR_BLUE,
+        "thumbnail": {"url": discord_api.avatar_url(user)},
+        "image": {"url": "attachment://day1.png"},
+        "footer": {"text": "Your before & after will build from here."},
+    }
+
+
+def _build_before_after_embed(user: dict, member: dict | None) -> dict:
+    week_str = datetime.now(timezone.utc).strftime("Week of %B %d, %Y")
+    return {
+        "title": f"🔥 Before & After — {discord_api.display_name(user, member)}",
+        "description": week_str,
+        "color": discord_api.COLOR_GREEN,
+        "thumbnail": {"url": discord_api.avatar_url(user)},
+        "image": {"url": "attachment://beforeafter.png"},
+        "footer": {"text": "Progress, not perfection. 💪"},
+    }
+
+
+def _consent_prompt(user_id: str) -> dict:
+    """Ephemeral message + button asking the user to opt into public photos."""
+    return {
+        "content": (
+            "📸 You attached a progress photo! Progress photos are shared "
+            "**publicly** in the check-in channel so everyone can cheer on your "
+            "before & after. Share it? *(one-time choice — your text check-in "
+            "was already posted.)*"
+        ),
+        "components": [
+            {
+                "type": 1,
+                "components": [
+                    {
+                        "type": 2,  # button
+                        "style": 3,  # success / green
+                        "label": "Share it 📸",
+                        "custom_id": f"photo_consent:{user_id}",
+                    }
+                ],
+            }
+        ],
     }
 
 
@@ -270,6 +319,21 @@ def _checkin_modal(starting: str | None, last_week: str | None) -> dict:
             item["value"] = value
         return {"type": 1, "components": [item]}
 
+    # A Label-wrapped File Upload (component type 19, inside a Label type 18)
+    # collects an optional progress photo right inside the modal — no separate
+    # command, no cross-interaction stash. GA on Discord since Nov 2025.
+    photo_upload = {
+        "type": 18,  # label
+        "label": "Progress photo (optional)",
+        "description": "Shared publicly for your before/after — one-time opt-in.",
+        "component": {
+            "type": 19,  # file upload
+            "custom_id": "progress_pic",
+            "max_values": 1,
+            "required": False,
+        },
+    }
+
     return {
         "type": MODAL,
         "data": {
@@ -293,18 +357,75 @@ def _checkin_modal(starting: str | None, last_week: str | None) -> dict:
                     "can_work_on", "Can Work On 🎯",
                     "Something to improve next week", paragraph=True, max_length=500,
                 ),
+                photo_upload,
             ],
         },
     }
 
 
-def _modal_values(interaction: dict) -> dict:
-    """Flatten modal-submit components into {custom_id: value}."""
-    out = {}
+def _iter_modal_components(interaction: dict):
+    """Yield each leaf component of a modal-submit payload.
+
+    Handles both action rows (type 1, plural ``components`` list) and the newer
+    Label wrappers (type 18, singular ``component``) used for File Upload.
+    """
     for row in interaction["data"]["components"]:
-        for comp in row["components"]:
-            out[comp["custom_id"]] = comp.get("value", "")
+        if "components" in row:
+            yield from row["components"]
+        elif "component" in row:
+            yield row["component"]
+        else:
+            yield row
+
+
+def _modal_values(interaction: dict) -> dict:
+    """Flatten modal-submit TEXT inputs into {custom_id: value}.
+
+    The File Upload component (type 19) is skipped here — its uploaded file is
+    resolved separately by _modal_photo_url.
+    """
+    out = {}
+    for comp in _iter_modal_components(interaction):
+        cid = comp.get("custom_id")
+        if cid and comp.get("type") != 19:
+            out[cid] = comp.get("value", "")
     return out
+
+
+def _modal_photo_url(interaction: dict) -> str | None:
+    """Return the signed CDN URL of the modal's uploaded photo, or None.
+
+    A File Upload component submits attachment id(s) under ``values``; the full
+    attachment objects live in ``data.resolved.attachments`` keyed by that id.
+    """
+    resolved = interaction["data"].get("resolved", {}).get("attachments", {})
+    for comp in _iter_modal_components(interaction):
+        if comp.get("type") == 19:
+            ids = comp.get("values") or []
+            if ids:
+                att = resolved.get(str(ids[0]))
+                return att.get("url") if att else None
+    return None
+
+
+def _command_attachment_url(interaction: dict, option_name: str) -> str | None:
+    """Resolve an attachment-type (11) slash-command option to its CDN URL."""
+    opt = next(
+        (o for o in interaction["data"].get("options", []) if o["name"] == option_name),
+        None,
+    )
+    if not opt:
+        return None
+    resolved = interaction["data"].get("resolved", {}).get("attachments", {})
+    att = resolved.get(str(opt.get("value")))
+    return att.get("url") if att else None
+
+
+def _username(user: dict) -> str:
+    """Display username, appending a legacy discriminator when present."""
+    disc = user.get("discriminator")
+    suffix = f"#{disc}" if disc not in (None, "0") else ""
+    return f"{user.get('username', 'unknown')}{suffix}"
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -377,6 +498,21 @@ def _handle_command(interaction: dict):
         data = {} if share else {"flags": EPHEMERAL}
         return jsonify({"type": DEFERRED_CHANNEL_MESSAGE, "data": data})
 
+    if name == "day1":
+        photo_url = _command_attachment_url(interaction, "photo")
+        tasks_queue.enqueue(
+            {
+                "kind": "set_baseline",
+                "token": interaction["token"],
+                "user": user,
+                "member_nick": (member or {}).get("nick"),
+                "username": _username(user),
+                "photo_url": photo_url,
+            },
+            _self_url(),
+        )
+        return jsonify({"type": DEFERRED_CHANNEL_MESSAGE, "data": {"flags": EPHEMERAL}})
+
     if name == "history":
         import sheets
 
@@ -411,9 +547,9 @@ def _handle_modal_submit(interaction: dict):
             "token": interaction["token"],
             "user": user,
             "member_nick": (member or {}).get("nick"),
-            "username": f"{user.get('username', 'unknown')}"
-            + (f"#{user['discriminator']}" if user.get("discriminator") not in (None, "0") else ""),
+            "username": _username(user),
             "values": values,
+            "photo_url": _modal_photo_url(interaction),
         },
         _self_url(),
     )
@@ -424,6 +560,24 @@ def _handle_component(interaction: dict):
     import tasks_queue
 
     custom_id = interaction["data"].get("custom_id", "")
+
+    if custom_id.startswith("photo_consent:"):
+        owner_id = custom_id.split(":", 1)[1]
+        user, member = _interaction_user(interaction)
+        if user["id"] != owner_id:
+            return jsonify({"type": DEFERRED_UPDATE_MESSAGE})
+        tasks_queue.enqueue(
+            {
+                "kind": "grant_consent",
+                "token": interaction["token"],
+                "user": user,
+                "member_nick": (member or {}).get("nick"),
+                "username": _username(user),
+            },
+            _self_url(),
+        )
+        return jsonify({"type": DEFERRED_UPDATE_MESSAGE})
+
     if not custom_id.startswith("progress:"):
         return jsonify({"type": DEFERRED_UPDATE_MESSAGE})
 
@@ -468,6 +622,10 @@ def process_task():
             _task_summary(payload)
         elif kind == "progress":
             _task_progress(payload)
+        elif kind == "set_baseline":
+            _task_set_baseline(payload)
+        elif kind == "grant_consent":
+            _task_grant_consent(payload)
         else:
             log.error("Unknown task kind: %s", kind)
     except Exception as e:
@@ -508,8 +666,130 @@ def _task_checkin_submit(payload: dict) -> None:
         proud_of=v["proud_of"],
         can_work_on=v["can_work_on"],
     )
+    # The text check-in always posts and confirms independently of any photo, so
+    # a photo/compose failure can never lose the written check-in.
     discord_api.post_channel_message(os.environ["CHECKIN_CHANNEL_ID"], {"embeds": [embed]})
-    discord_api.edit_original_response(payload["token"], {"content": "✅ Check-in submitted!"})
+
+    photo_url = payload.get("photo_url")
+    if not photo_url:
+        discord_api.edit_original_response(payload["token"], {"content": "✅ Check-in submitted!"})
+        return
+
+    if sheets.get_photo_state(user["id"])["consent"]:
+        _post_progress_photo(user, member, photo_url)
+        discord_api.edit_original_response(
+            payload["token"], {"content": "✅ Check-in submitted with your photo!"}
+        )
+    else:
+        # Hold the photo privately (Sheet) behind a one-time public-sharing opt-in.
+        sheets.upsert_photo_state(user["id"], payload["username"], pending_url=photo_url)
+        discord_api.edit_original_response(payload["token"], _consent_prompt(user["id"]))
+
+
+def _msg_date(msg: dict) -> str:
+    """'Mon DD, YYYY' from a Discord message's ISO timestamp (best-effort)."""
+    try:
+        return datetime.fromisoformat(msg.get("timestamp", "")).strftime("%b %d, %Y")
+    except (ValueError, TypeError):
+        return "Day 1"
+
+
+def _post_progress_photo(user: dict, member: dict | None, photo_url: str) -> None:
+    """Post the user's photo as their Day 1 (first ever) or a Before/After.
+
+    On the first photo, the posted message becomes the durable Day 1 reference.
+    Thereafter, the stored Day 1 message is re-fetched (fresh signed URL) and
+    composited against the new photo.
+    """
+    import images
+    import sheets
+
+    channel = os.environ["CHECKIN_CHANNEL_ID"]
+    now_png = images.normalize(discord_api.download_image(photo_url))
+    now_date = datetime.now(timezone.utc).strftime("%b %d, %Y")
+
+    day1_ref = sheets.get_photo_state(user["id"])["day1_ref"]
+    if not day1_ref:
+        msg = discord_api.post_channel_message(
+            channel,
+            {"embeds": [_build_day1_embed(user, member, now_date)]},
+            file_buf=io.BytesIO(now_png),
+            filename="day1.png",
+        )
+        sheets.upsert_photo_state(user["id"], _username(user), day1_ref=str(msg["id"]))
+        return
+
+    day1_msg = discord_api.get_message(channel, day1_ref)
+    day1_png = discord_api.download_image(day1_msg["attachments"][0]["url"])
+    composite = images.compose_before_after(
+        day1_png, now_png, f"Day 1 — {_msg_date(day1_msg)}", f"Now — {now_date}"
+    )
+    discord_api.post_channel_message(
+        channel,
+        {"embeds": [_build_before_after_embed(user, member)]},
+        file_buf=composite,
+        filename="beforeafter.png",
+    )
+
+
+def _task_set_baseline(payload: dict) -> None:
+    """/day1 — set or replace the user's Day 1 baseline photo."""
+    import images
+    import sheets
+
+    user = payload["user"]
+    member = {"nick": payload.get("member_nick")} if payload.get("member_nick") else None
+    photo_url = payload.get("photo_url")
+    token = payload["token"]
+
+    if not photo_url:
+        discord_api.edit_original_response(token, {"content": "⚠️ No photo received. Try again."})
+        return
+
+    if not sheets.get_photo_state(user["id"])["consent"]:
+        sheets.upsert_photo_state(user["id"], payload["username"], pending_url=photo_url)
+        discord_api.edit_original_response(token, _consent_prompt(user["id"]))
+        return
+
+    # Consented: post a fresh Day 1 and overwrite the stored reference.
+    channel = os.environ["CHECKIN_CHANNEL_ID"]
+    now_png = images.normalize(discord_api.download_image(photo_url))
+    now_date = datetime.now(timezone.utc).strftime("%b %d, %Y")
+    msg = discord_api.post_channel_message(
+        channel,
+        {"embeds": [_build_day1_embed(user, member, now_date)]},
+        file_buf=io.BytesIO(now_png),
+        filename="day1.png",
+    )
+    sheets.upsert_photo_state(user["id"], payload["username"], day1_ref=str(msg["id"]))
+    discord_api.edit_original_response(
+        token,
+        {"content": "📸 Day 1 photo saved! Your next check-in photo will show your before & after."},
+    )
+
+
+def _task_grant_consent(payload: dict) -> None:
+    """Photo-sharing opt-in button → record consent and post the pending photo."""
+    import sheets
+
+    user = payload["user"]
+    member = {"nick": payload.get("member_nick")} if payload.get("member_nick") else None
+    token = payload["token"]
+
+    state = sheets.get_photo_state(user["id"])
+    sheets.upsert_photo_state(user["id"], payload["username"], consent=True)
+
+    if state["pending_url"]:
+        _post_progress_photo(user, member, state["pending_url"])
+        sheets.upsert_photo_state(user["id"], payload["username"], pending_url="")
+
+    discord_api.edit_original_response(
+        token,
+        {
+            "content": "✅ Shared! Your photos will now appear with your check-ins. 💪",
+            "components": [],
+        },
+    )
 
 
 def _task_summary(payload: dict) -> None:
