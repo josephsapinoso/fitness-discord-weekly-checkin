@@ -117,13 +117,23 @@ modal = resp.get_json()
 check("checkin → modal type 9", modal["type"] == 9)
 check("modal custom_id", modal["data"]["custom_id"] == "checkin_modal")
 rows = modal["data"]["components"]
-check("modal has 5 text inputs + photo upload", len(rows) == 6)
-inputs = {r["components"][0]["custom_id"]: r["components"][0] for r in rows if "components" in r}
+# Discord rejects any modal with more than 5 components ("Between 1 and 5
+# (inclusive) components that make up the modal") — and a rejected modal
+# surfaces to the user as "The application did not respond", with the service
+# still logging a healthy 200. Guard the ceiling explicitly.
+check("modal within Discord's 5-component cap", len(rows) <= 5, f"got {len(rows)}")
+check("modal has 4 text inputs + photo upload", len(rows) == 5)
+check("all components Label-wrapped", all(r["type"] == 18 for r in rows))
+inputs = {
+    r["component"]["custom_id"]: r["component"]
+    for r in rows
+    if r["component"]["type"] == 4
+}
+check("starting weight not asked for", "starting_weight" not in inputs)
 check("prefill last week", inputs["last_week_weight"].get("value") == "190 lbs")
-check("prefill starting", inputs["starting_weight"].get("value") == "200 lbs")
 check("current not prefilled", "value" not in inputs["current_weight"])
 check("paragraph styles", inputs["proud_of"]["style"] == 2 and inputs["can_work_on"]["style"] == 2)
-photo_row = next(r for r in rows if r.get("type") == 18)
+photo_row = next(r for r in rows if r["component"]["type"] == 19)
 check(
     "photo upload component",
     photo_row["component"]["type"] == 19
@@ -142,12 +152,16 @@ resp = signed_post(cmd_interaction("checkin"))
 elapsed = time.time() - t0
 modal = resp.get_json()
 rows = {
-    r["components"][0]["custom_id"]: r["components"][0]
+    r["component"]["custom_id"]: r["component"]
     for r in modal["data"]["components"]
-    if "components" in r
+    if r["component"]["type"] == 4
 }
 check("slow prefill → modal within budget", modal["type"] == 9 and elapsed < 2.0, f"{elapsed:.2f}s")
 check("slow prefill → no values", "value" not in rows["last_week_weight"])
+
+# Restore a fast stub: the checkin_submit task now calls get_user_prefill to
+# recover Starting Weight, so leaving slow_prefill bound would add 3s per task.
+sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs")
 
 # ── 3. Deferred commands enqueue tasks ─────────────────────────────────────────
 enqueued.clear()
@@ -230,6 +244,10 @@ discord_api.post_channel_message = lambda cid, payload, file_buf=None, filename=
 ].append((cid, payload, file_buf))
 app_module.discord_api = discord_api
 
+def _raise_sheets(uid):
+    raise RuntimeError("sheets down")
+
+
 # checkin_submit task
 logged = []
 sheets.log_checkin = lambda **kw: logged.append(kw)
@@ -244,7 +262,6 @@ resp = client.post(
         "values": {
             "current_weight": "185 lbs",
             "last_week_weight": "186.2",
-            "starting_weight": "200",
             "proud_of": "Ran 3x",
             "can_work_on": "Sleep",
         },
@@ -253,6 +270,8 @@ resp = client.post(
 )
 check("checkin task → 200", resp.status_code == 200)
 check("checkin row logged", logged[0]["current_weight"] == "185 lbs" and logged[0]["user_id"] == "42")
+# Starting Weight is no longer submitted by the modal — it comes from the sheet.
+check("starting weight recovered from sheet", logged[0]["starting_weight"] == "200 lbs")
 cid, embed_payload, _ = calls["post"][0]
 embed = embed_payload["embeds"][0]
 check("checkin embed → right channel", cid == "999888777")
@@ -260,6 +279,23 @@ check("checkin embed title uses nick", embed["title"] == "Weekly Check-in — Jo
 weight_field = embed["fields"][0]
 check("weight change computed", "📉 -1.2" in weight_field["value"], weight_field["value"])
 check("checkin ephemeral confirmed", calls["edit"][0][1]["content"].startswith("✅"))
+
+# First-ever check-in: nothing in the sheet to recover, so today's weight IS the
+# starting weight. And a Sheets outage must not lose the check-in entirely.
+submit_body = {
+    "kind": "checkin_submit", "token": "t", "user": USER, "username": "joe",
+    "values": {"current_weight": "185 lbs", "last_week_weight": "", "proud_of": "x", "can_work_on": "y"},
+}
+for label, stub, expected in [
+    ("first check-in", lambda uid: (None, None), "185 lbs"),
+    ("prefill raises", _raise_sheets, "185 lbs"),
+]:
+    logged.clear()
+    sheets.get_user_prefill = stub
+    resp = client.post("/process", json=submit_body, headers={"X-Task-Secret": "s3cret"})
+    check(f"{label} → 200", resp.status_code == 200)
+    check(f"{label} → starting falls back to current", logged[0]["starting_weight"] == expected)
+sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs")
 
 # summary task
 sheets.get_latest_checkins = lambda limit=10: [

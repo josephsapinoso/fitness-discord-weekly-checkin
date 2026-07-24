@@ -38,6 +38,10 @@ fi
 # and MAX_IMAGE_BYTES (default 10 MiB) both have sensible defaults. requirements
 # are unchanged (Pillow already ships with matplotlib), so this just rebuilds the
 # container with the new code.
+# --cpu-boost: Discord discards any interaction response that takes more than
+# 3.000s, and a cold start (gunicorn + matplotlib import) measured 3.006s —
+# just over the line, so the first /checkin after an idle period was lost.
+# Startup CPU boost buys that back while still scaling to zero when idle.
 gcloud run deploy "$SERVICE" \
   --source . \
   --region "$REGION" \
@@ -45,6 +49,7 @@ gcloud run deploy "$SERVICE" \
   --memory 512Mi \
   --min-instances 0 \
   --max-instances 1 \
+  --cpu-boost \
   --env-vars-file env.yaml
 
 URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"

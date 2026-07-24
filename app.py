@@ -304,12 +304,15 @@ def _build_progress_payload(history: list[dict], view: str, user: dict, member: 
 
 
 # ── The check-in modal ─────────────────────────────────────────────────────────
-def _checkin_modal(starting: str | None, last_week: str | None) -> dict:
+def _checkin_modal(last_week: str | None) -> dict:
+    # Discord caps a modal at 5 components ("Between 1 and 5 (inclusive)"), and
+    # the file upload below spends one of them. Starting Weight is therefore NOT
+    # asked for — _task_checkin_submit reads it back out of the sheet, which is
+    # where it came from anyway (it was only ever prefilled for confirmation).
     def text_input(custom_id, label, placeholder, *, paragraph=False, value=None, max_length=50):
         item = {
             "type": 4,  # text input
             "custom_id": custom_id,
-            "label": label,
             "style": 2 if paragraph else 1,
             "placeholder": placeholder,
             "required": True,
@@ -317,7 +320,10 @@ def _checkin_modal(starting: str | None, last_week: str | None) -> dict:
         }
         if value:
             item["value"] = value
-        return {"type": 1, "components": [item]}
+        # Label (type 18) rather than an Action Row: action rows wrapping text
+        # inputs are deprecated in modals, and the file upload has to be
+        # Label-wrapped, so the whole modal uses one consistent format.
+        return {"type": 18, "label": label, "component": item}
 
     # A Label-wrapped File Upload (component type 19, inside a Label type 18)
     # collects an optional progress photo right inside the modal — no separate
@@ -344,10 +350,6 @@ def _checkin_modal(starting: str | None, last_week: str | None) -> dict:
                 text_input(
                     "last_week_weight", "Last Week's Weight",
                     "Auto-filled from your last check-in", value=last_week,
-                ),
-                text_input(
-                    "starting_weight", "Starting Weight",
-                    "Auto-filled from your first check-in", value=starting,
                 ),
                 text_input(
                     "proud_of", "Proud of 🌟",
@@ -466,15 +468,15 @@ def _handle_command(interaction: dict):
     if name == "checkin":
         # Modals can't be deferred, so the prefill Sheets read gets a hard
         # time budget; on a slow/cold read the modal opens without prefill.
-        starting = last_week = None
+        last_week = None
         try:
             import sheets
 
             future = _prefill_pool.submit(sheets.get_user_prefill, user["id"])
-            starting, last_week = future.result(timeout=PREFILL_TIMEOUT_S)
+            _, last_week = future.result(timeout=PREFILL_TIMEOUT_S)
         except Exception as e:
             log.warning("Prefill skipped: %s", e)
-        return jsonify(_checkin_modal(starting, last_week))
+        return jsonify(_checkin_modal(last_week))
 
     if name == "summary":
         tasks_queue.enqueue(
@@ -648,12 +650,24 @@ def _task_checkin_submit(payload: dict) -> None:
     member = {"nick": payload.get("member_nick")} if payload.get("member_nick") else None
     v = payload["values"]
 
+    # Starting Weight is no longer a modal field (the modal is at Discord's
+    # 5-component ceiling), so recover it from the user's first check-in. This
+    # read happens BEFORE log_checkin so the row being written now can't be
+    # mistaken for the first one. On a first-ever check-in there is nothing to
+    # find, and today's weight is by definition the starting weight.
+    try:
+        starting, _ = sheets.get_user_prefill(user["id"])
+    except Exception as e:
+        log.warning("Starting-weight lookup failed: %s", e)
+        starting = None
+    starting = starting or v["current_weight"]
+
     sheets.log_checkin(
         user_id=user["id"],
         username=payload["username"],
         current_weight=v["current_weight"],
         last_week_weight=v["last_week_weight"],
-        starting_weight=v["starting_weight"],
+        starting_weight=starting,
         proud_of=v["proud_of"],
         can_work_on=v["can_work_on"],
     )
@@ -662,7 +676,7 @@ def _task_checkin_submit(payload: dict) -> None:
         user, member,
         current=v["current_weight"],
         last_week=v["last_week_weight"],
-        starting=v["starting_weight"],
+        starting=starting,
         proud_of=v["proud_of"],
         can_work_on=v["can_work_on"],
     )

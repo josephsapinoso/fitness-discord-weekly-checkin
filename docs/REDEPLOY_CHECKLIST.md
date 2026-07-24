@@ -23,7 +23,10 @@ be done by hand in Discord).
 ## The steps
 
 - [ ] **1. Sync merged code** — `git checkout main && git pull origin main`
-- [ ] **2. Deploy to Cloud Run** — `gcloud run deploy fitness-checkin-bot --source . --region us-west1 --allow-unauthenticated --memory 512Mi --min-instances 0 --max-instances 1 --env-vars-file env.yaml`
+- [ ] **2. Deploy to Cloud Run** — `gcloud run deploy fitness-checkin-bot --source . --region us-west1 --allow-unauthenticated --memory 512Mi --min-instances 0 --max-instances 1 --cpu-boost --env-vars-file env.yaml`
+      - Keep `--cpu-boost`. Discord drops any interaction response slower than
+        3.000s; a cold start without boost measured 3.006s and silently ate the
+        first `/checkin` after an idle period.
       - No `env.yaml` edits required. Optional new vars `GOOGLE_PHOTOS_TAB`
         (default `Photos`) and `MAX_IMAGE_BYTES` (default 10 MiB) only if you
         want to override them.
