@@ -11,6 +11,7 @@ are monkeypatched.
 import io
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -404,12 +405,40 @@ check(
 # ── 9. register_commands payload sanity ────────────────────────────────────────
 import register_commands
 
-names = [c["name"] for c in register_commands.COMMANDS]
-check("5 commands registered", names == ["checkin", "summary", "progress", "history", "day1"])
-share_opt = register_commands.COMMANDS[2]["options"][0]
-check("share option is boolean+optional", share_opt["type"] == 5 and share_opt["required"] is False)
-day1_opt = register_commands.COMMANDS[4]["options"][0]
-check("day1 photo option is attachment+required", day1_opt["type"] == 11 and day1_opt["required"] is True)
+by_name = {c["name"]: c for c in register_commands.COMMANDS}
+check(
+    "8 commands registered",
+    sorted(by_name) == sorted(
+        ["checkin", "summary", "progress", "history", "day1",
+         "collage", "howto", "photo-replace"]
+    ),
+    str(sorted(by_name)),
+)
+
+
+def opt(cmd: str, name: str) -> dict:
+    return next(o for o in by_name[cmd]["options"] if o["name"] == name)
+
+
+check("share option is boolean+optional",
+      opt("progress", "share")["type"] == 5 and opt("progress", "share")["required"] is False)
+check("day1 photo option is attachment+required",
+      opt("day1", "photo")["type"] == 11 and opt("day1", "photo")["required"] is True)
+check("photo-replace date has autocomplete",
+      opt("photo-replace", "date")["type"] == 3
+      and opt("photo-replace", "date").get("autocomplete") is True)
+check("photo-replace photo is attachment+required",
+      opt("photo-replace", "photo")["type"] == 11 and opt("photo-replace", "photo")["required"] is True)
+
+# Drift guard: a command Discord knows about but app.py can't answer produces
+# "the application did not respond" in the channel, which is invisible here
+# unless we check the two lists agree.
+handled = set(re.findall(r'if name == "([a-z0-9-]+)"', open(
+    os.path.join(ROOT, "app.py"), encoding="utf-8").read()))
+check("every registered command is handled in app.py",
+      set(by_name) <= handled, str(set(by_name) - handled))
+check("every handled command is registered",
+      handled <= set(by_name), str(handled - set(by_name)))
 
 
 # ── 10. Progress photos: modal upload, /day1, consent, before/after ────────────
@@ -599,5 +628,176 @@ client.post("/process", json={"kind": "set_baseline", "token": "tok-b2", "user":
 check("set_baseline unconsented → no public post", len(calls["post"]) == 0)
 check("set_baseline unconsented → consent button",
       calls["edit"][-1][1]["components"][0]["components"][0]["custom_id"] == "photo_consent:42")
+
+# ── 8. Photo history: sampling, collage, replace, autocomplete ────────────────
+import images  # noqa: E402
+
+# sample_timeline: never exceeds the cap, always keeps both ends.
+check("sample 0 photos", images.sample_timeline([]) == [])
+check("sample under cap unchanged", images.sample_timeline([1, 2, 3]) == [1, 2, 3])
+_fifty = list(range(50))
+_s = images.sample_timeline(_fifty)
+check("sample caps at 9", len(_s) == 9, str(len(_s)))
+check("sample keeps first and last", _s[0] == 0 and _s[-1] == 49, str(_s))
+check("sample is ordered + unique", _s == sorted(set(_s)))
+check("sample limit=1 takes latest", images.sample_timeline(_fifty, limit=1) == [49])
+
+# Archive OFF (ARCHIVE_CHANNEL_ID unset): check-ins must be unaffected. The
+# photo flows above already ran in this state — assert the switch explicitly.
+check("archive disabled when unconfigured", app_module._archive_channel() is None)
+
+photo_log: list[dict] = []
+deactivated: list[tuple] = []
+logged_rows: list[dict] = []
+sheets.get_photo_log = lambda uid, active_only=True: list(photo_log)
+sheets.append_photo_log = lambda **kw: logged_rows.append(kw)
+
+
+def fake_deactivate(uid, taken_on):
+    deactivated.append((uid, taken_on))
+    return next((p for p in photo_log if p["taken_on"] == taken_on), None)
+
+
+sheets.deactivate_photo_log_row = fake_deactivate
+deleted: list[tuple] = []
+discord_api.delete_message = lambda cid, mid: deleted.append((str(cid), str(mid))) or True
+app_module.discord_api = discord_api
+
+# Everything below needs the archive configured.
+os.environ["ARCHIVE_CHANNEL_ID"] = "555444333"
+check("archive enabled when configured", app_module._archive_channel() == "555444333")
+
+# /collage with no photos → friendly nudge, nothing posted
+photo_log.clear(); calls["post"].clear(); calls["edit"].clear()
+client.post("/process", json={"kind": "collage", "token": "tok-col", "user": USER, "member_nick": None},
+            headers={"X-Task-Secret": "s3cret"})
+check("collage empty → nudge", "No progress photos yet" in calls["edit"][-1][1]["content"])
+check("collage empty → nothing posted", len(calls["post"]) == 0)
+
+# /collage with photos → renders a real PNG
+photo_log.extend([
+    {"taken_on": "2026-01-01", "archive_ref": "a1", "post_ref": "p1", "kind": "day1"},
+    {"taken_on": "2026-02-01", "archive_ref": "a2", "post_ref": "p2", "kind": "progress"},
+    {"taken_on": "2026-03-01", "archive_ref": "a3", "post_ref": "p3", "kind": "progress"},
+])
+calls["edit"].clear()
+client.post("/process", json={"kind": "collage", "token": "tok-col2", "user": USER, "member_nick": "Joey"},
+            headers={"X-Task-Secret": "s3cret"})
+_col = calls["edit"][-1]
+check("collage → real PNG", _col[2] is not None and _col[2].getvalue()[:8] == b"\x89PNG\r\n\x1a\n")
+check("collage → embed titled", _col[1]["embeds"][0]["title"].startswith("🖼️ Progress Collage"))
+check("collage → date range in description", "2026-01-01" in _col[1]["embeds"][0]["description"]
+      and "2026-03-01" in _col[1]["embeds"][0]["description"])
+
+# A single unreadable archive photo degrades that panel, not the whole collage.
+_real_get = discord_api.get_message
+discord_api.get_message = lambda cid, mid: (_ for _ in ()).throw(RuntimeError("gone")) if mid == "a2" \
+    else _real_get(cid, mid)
+calls["edit"].clear()
+client.post("/process", json={"kind": "collage", "token": "tok-col3", "user": USER, "member_nick": None},
+            headers={"X-Task-Secret": "s3cret"})
+check("collage survives one bad photo", calls["edit"][-1][2] is not None)
+check("collage counts only readable panels", "2 photos" in calls["edit"][-1][1]["embeds"][0]["description"])
+discord_api.get_message = _real_get
+
+# /photo-replace on a known date → deletes both old copies, posts + relogs
+photo_state.update({"consent": True, "day1_ref": "old-ref", "pending_url": None})
+calls["post"].clear(); calls["edit"].clear(); deleted.clear(); logged_rows.clear()
+client.post("/process", json={"kind": "photo_replace", "token": "tok-r", "user": USER, "member_nick": None,
+                              "username": "joe", "taken_on": "2026-02-01",
+                              "photo_url": "https://cdn/new.png"}, headers={"X-Task-Secret": "s3cret"})
+check("replace → deactivated the row", deactivated[-1] == ("42", "2026-02-01"))
+check("replace → deleted archive + public copies",
+      ("555444333", "a2") in deleted and ("999888777", "p2") in deleted, str(deleted))
+_public = [c for c in calls["post"] if c[0] == "999888777"]
+_arch = [c for c in calls["post"] if c[0] == "555444333"]
+check("replace → one public post", len(_public) == 1
+      and _public[0][1]["embeds"][0]["title"].startswith("🔄 Updated photo"))
+check("replace → filename matches embed attachment", _public[0][3] == "progress.png")
+check("replace → raw photo re-archived", len(_arch) == 1)
+check("replace → new log row", logged_rows[-1]["taken_on"] == "2026-02-01"
+      and logged_rows[-1]["kind"] == "progress")
+check("replace → confirms with pretty date", "Feb 01, 2026" in calls["edit"][-1][1]["content"])
+
+# Replacing the Day 1 photo must re-point the baseline, or before/after breaks.
+calls["post"].clear(); calls["edit"].clear(); upserts.clear()
+client.post("/process", json={"kind": "photo_replace", "token": "tok-r2", "user": USER, "member_nick": None,
+                              "username": "joe", "taken_on": "2026-01-01",
+                              "photo_url": "https://cdn/new2.png"}, headers={"X-Task-Secret": "s3cret"})
+_public = [c for c in calls["post"] if c[0] == "999888777"]
+check("replace day1 → uses day1 embed", _public[0][1]["embeds"][0]["title"].startswith("📸 Day 1"))
+check("replace day1 → filename day1.png", _public[0][3] == "day1.png")
+check("replace day1 → baseline re-pointed", any(f.get("day1_ref") == "stored-1" for f in upsert_fields()))
+
+# Unknown date → clear error, nothing deleted or posted
+calls["post"].clear(); calls["edit"].clear(); deleted.clear()
+client.post("/process", json={"kind": "photo_replace", "token": "tok-r3", "user": USER, "member_nick": None,
+                              "username": "joe", "taken_on": "1999-01-01",
+                              "photo_url": "https://cdn/new.png"}, headers={"X-Task-Secret": "s3cret"})
+check("replace unknown date → no deletes", deleted == [])
+check("replace unknown date → no post", len(calls["post"]) == 0)
+check("replace unknown date → explains", "No photo found" in calls["edit"][-1][1]["content"])
+
+# Replace without consent → consent prompt, nothing destroyed
+photo_state.update({"consent": False, "day1_ref": None, "pending_url": None})
+calls["post"].clear(); calls["edit"].clear(); deleted.clear()
+client.post("/process", json={"kind": "photo_replace", "token": "tok-r4", "user": USER, "member_nick": None,
+                              "username": "joe", "taken_on": "2026-02-01",
+                              "photo_url": "https://cdn/new.png"}, headers={"X-Task-Secret": "s3cret"})
+check("replace unconsented → no deletes", deleted == [])
+check("replace unconsented → consent button",
+      calls["edit"][-1][1]["components"][0]["components"][0]["custom_id"] == "photo_consent:42")
+
+# Autocomplete: type 8, newest first, filtered by what's typed, capped at 25.
+def ac_interaction(typed: str) -> dict:
+    return {"type": 4, "token": "tok-ac", "data": {
+        "name": "photo-replace",
+        "options": [{"name": "date", "value": typed, "focused": True}]},
+        "member": {"user": USER, "nick": None}}
+
+
+resp = signed_post(ac_interaction(""))
+body = resp.get_json()
+check("autocomplete → type 8", body["type"] == 8)
+_names = [c["value"] for c in body["data"]["choices"]]
+check("autocomplete newest first", _names == ["2026-03-01", "2026-02-01", "2026-01-01"], str(_names))
+check("autocomplete labels day1", any("(Day 1)" in c["name"] for c in body["data"]["choices"]))
+check("autocomplete filters on typed text",
+      [c["value"] for c in signed_post(ac_interaction("02")).get_json()["data"]["choices"]] == ["2026-02-01"])
+
+_many = [{"taken_on": f"2026-{m:02d}-{d:02d}", "archive_ref": "a", "post_ref": "p", "kind": "progress"}
+         for m in range(1, 13) for d in (1, 8, 15)]  # 36 > Discord's 25 cap
+photo_log.clear(); photo_log.extend(_many)
+check("autocomplete caps at 25", len(signed_post(ac_interaction("")).get_json()["data"]["choices"]) == 25)
+
+# A slow sheet must not blow the 3s deadline — degrade to no suggestions.
+def slow_log(uid, active_only=True):
+    time.sleep(3)
+    return _many
+
+
+sheets.get_photo_log = slow_log
+_t0 = time.time()
+body = signed_post(ac_interaction("")).get_json()
+check("autocomplete degrades within budget",
+      body["type"] == 8 and body["data"]["choices"] == [] and time.time() - _t0 < 2.0)
+sheets.get_photo_log = lambda uid, active_only=True: list(photo_log)
+
+# /howto renders and is pinnable-shaped (public when shared, ephemeral otherwise)
+body = signed_post(cmd_interaction("howto")).get_json()
+check("howto → ephemeral by default", body["data"]["flags"] == 64)
+body = signed_post(cmd_interaction("howto", [{"name": "share", "value": True}])).get_json()
+check("howto share → public", "flags" not in body["data"])
+_fields = " ".join(f["value"] for f in body["data"]["embeds"][0]["fields"])
+check("howto documents the real modal fields",
+      "Current weight" in _fields and "Last week's weight" in _fields)
+check("howto doesn't ask for starting weight", "starting weight" not in _fields.lower()
+      or "remembered automatically" in _fields)
+check("howto lists the new commands", "/collage" in _fields and "/photo-replace" in _fields)
+
+# The weekly reminder must not advertise a field the modal no longer has.
+_reminder = app_module._reminder_embed()["description"]
+check("reminder drops starting weight", "Starting weight" not in _reminder)
+check("reminder mentions optional photo", "progress photo" in _reminder.lower())
 
 print(f"\nAll {PASS} checks passed ✅")

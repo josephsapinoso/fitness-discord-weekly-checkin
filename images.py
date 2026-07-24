@@ -10,6 +10,7 @@ image so a decompression bomb or huge upload can't exhaust memory.
 """
 
 import io
+import math
 
 import matplotlib
 
@@ -46,6 +47,64 @@ def _panel(ax, png_bytes: bytes, caption: str) -> None:
         ax.imshow(img)
     ax.set_title(caption, color=charts.FG, fontsize=12, fontweight="bold", pad=10)
     ax.axis("off")
+
+
+MAX_COLLAGE_PANELS = 9
+
+
+def sample_timeline(items: list, limit: int = MAX_COLLAGE_PANELS) -> list:
+    """Evenly spread `limit` items across `items`, always keeping the ends.
+
+    A year of weekly photos is 52 panels — too slow to render and past
+    Discord's attachment cap. Sampling keeps the grid readable while
+    preserving the first and most recent shots, which carry the contrast.
+    """
+    if limit < 1:
+        return []
+    n = len(items)
+    if n <= limit:
+        return list(items)
+    if limit == 1:
+        return [items[-1]]
+    # Fractional stride, rounded per index, so the picks stay evenly spaced and
+    # the first and last elements are always included.
+    step = (n - 1) / (limit - 1)
+    picked = sorted({round(i * step) for i in range(limit)})
+    return [items[i] for i in picked]
+
+
+def render_collage(panels: list[tuple[bytes, str]]) -> io.BytesIO:
+    """Grid of captioned progress photos as one PNG.
+
+    `panels` is [(png_bytes, caption)], oldest first. Lays out a square-ish
+    grid sized to the count; a single photo renders on its own rather than as
+    a 1x1 "collage".
+    """
+    if not panels:
+        raise ValueError("render_collage needs at least one panel")
+
+    count = len(panels)
+    cols = 1 if count == 1 else math.ceil(math.sqrt(count))
+    rows = math.ceil(count / cols)
+
+    fig, axes = plt.subplots(
+        rows, cols, figsize=(4.5 * cols, 5.0 * rows), dpi=130, squeeze=False
+    )
+    fig.patch.set_facecolor(charts.BG)
+
+    flat = [ax for row in axes for ax in row]
+    for ax, (png, caption) in zip(flat, panels):
+        _panel(ax, png, caption)
+    # Blank out any unused cells so empty axes don't draw frames.
+    for ax in flat[count:]:
+        ax.axis("off")
+
+    fig.tight_layout(pad=1.2)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=charts.BG, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 
 def compose_before_after(

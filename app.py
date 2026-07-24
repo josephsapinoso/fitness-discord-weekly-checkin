@@ -46,12 +46,13 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 # ── Discord interaction constants ──────────────────────────────────────────────
 # Incoming interaction types
-PING, APPLICATION_COMMAND, MESSAGE_COMPONENT, MODAL_SUBMIT = 1, 2, 3, 5
+PING, APPLICATION_COMMAND, MESSAGE_COMPONENT, AUTOCOMPLETE, MODAL_SUBMIT = 1, 2, 3, 4, 5
 # Response types
 PONG = 1
 CHANNEL_MESSAGE = 4
 DEFERRED_CHANNEL_MESSAGE = 5
 DEFERRED_UPDATE_MESSAGE = 6
+AUTOCOMPLETE_RESULT = 8
 MODAL = 9
 # Message flags
 EPHEMERAL = 64
@@ -144,6 +145,77 @@ def _build_day1_embed(user: dict, member: dict | None, date_str: str) -> dict:
     }
 
 
+def _pretty_date(iso_date: str) -> str:
+    """'2026-07-24' → 'Jul 24, 2026'; passes anything unparseable straight through."""
+    try:
+        return datetime.strptime(iso_date, "%Y-%m-%d").strftime("%b %d, %Y")
+    except (ValueError, TypeError):
+        return iso_date
+
+
+def _build_replacement_embed(user: dict, member: dict | None, date_str: str) -> dict:
+    return {
+        "title": f"🔄 Updated photo — {discord_api.display_name(user, member)}",
+        "description": f"Progress photo for **{date_str}** was replaced.",
+        "color": discord_api.COLOR_BLUE,
+        "thumbnail": {"url": discord_api.avatar_url(user)},
+        "image": {"url": "attachment://progress.png"},
+    }
+
+
+def _build_howto_embed() -> dict:
+    """The pinnable how-to. Kept in sync with the actual /checkin modal."""
+    return {
+        "title": "📌 How the weekly check-in works",
+        "color": discord_api.COLOR_GOLD,
+        "description": "Run `/checkin` any time during the week — it opens a private form.",
+        "fields": [
+            {
+                "name": "1️⃣ Fill in the form",
+                "value": (
+                    "⚖️ **Current weight**\n"
+                    "📅 **Last week's weight** — filled in for you from your last check-in\n"
+                    "🌟 **Proud of** — a win from this week\n"
+                    "🎯 **Can work on** — something for next week\n\n"
+                    "*Your starting weight is remembered automatically — no need to type it.*"
+                ),
+            },
+            {
+                "name": "2️⃣ Add a photo (optional)",
+                "value": (
+                    "The form has a **Progress photo** slot at the bottom. Skipping it is "
+                    "completely fine — the check-in posts either way."
+                ),
+            },
+            {
+                "name": "3️⃣ One-time opt-in",
+                "value": (
+                    "The first time you attach a photo, only **you** see it. The bot asks "
+                    "once whether to share photos publicly. Nothing is posted until you say yes."
+                ),
+            },
+            {
+                "name": "4️⃣ Day 1 and before/after",
+                "value": (
+                    "Your first shared photo becomes **Day 1**. Every photo after that posts "
+                    "as a **before & after** next to it. Use `/day1` to reset your baseline."
+                ),
+            },
+            {
+                "name": "🛠️ Other commands",
+                "value": (
+                    "`/progress` — your weight chart\n"
+                    "`/collage` — a grid of your progress photos\n"
+                    "`/photo-replace` — swap the photo for a specific date\n"
+                    "`/summary` — everyone's latest check-ins\n"
+                    "`/history` — link to the full spreadsheet"
+                ),
+            },
+        ],
+        "footer": {"text": "Consistency beats perfection 💪"},
+    }
+
+
 def _build_before_after_embed(user: dict, member: dict | None) -> dict:
     week_str = datetime.now(timezone.utc).strftime("Week of %B %d, %Y")
     return {
@@ -224,12 +296,15 @@ def _reminder_embed() -> dict:
         "description": (
             "It's time for your weekly fitness check-in! "
             "Use `/checkin` to log your progress.\n\n"
+            # Starting weight is no longer asked for — it's derived from your
+            # first check-in — so listing it here would send people looking for
+            # a field the form doesn't have.
             "**This week, share:**\n"
             "⚖️ Current weight\n"
             "📅 Last week's weight\n"
-            "🚀 Starting weight\n"
             "🌟 Something you're proud of\n"
-            "🎯 Something to work on"
+            "🎯 Something to work on\n"
+            "📸 A progress photo (optional)"
         ),
         "color": discord_api.COLOR_GOLD,
         "footer": {"text": "Consistency is key 💪"},
@@ -454,6 +529,9 @@ def interactions():
     if itype == MESSAGE_COMPONENT:
         return _handle_component(interaction)
 
+    if itype == AUTOCOMPLETE:
+        return _handle_autocomplete(interaction)
+
     return jsonify(
         {"type": CHANNEL_MESSAGE, "data": {"content": "Unsupported interaction.", "flags": EPHEMERAL}}
     )
@@ -500,6 +578,45 @@ def _handle_command(interaction: dict):
         data = {} if share else {"flags": EPHEMERAL}
         return jsonify({"type": DEFERRED_CHANNEL_MESSAGE, "data": data})
 
+    if name == "collage":
+        options = {o["name"]: o.get("value") for o in interaction["data"].get("options", [])}
+        share = bool(options.get("share", False))
+        tasks_queue.enqueue(
+            {
+                "kind": "collage",
+                "token": interaction["token"],
+                "user": user,
+                "member_nick": (member or {}).get("nick"),
+            },
+            _self_url(),
+        )
+        data = {} if share else {"flags": EPHEMERAL}
+        return jsonify({"type": DEFERRED_CHANNEL_MESSAGE, "data": data})
+
+    if name == "howto":
+        options = {o["name"]: o.get("value") for o in interaction["data"].get("options", [])}
+        share = bool(options.get("share", False))
+        data: dict = {"embeds": [_build_howto_embed()]}
+        if not share:
+            data["flags"] = EPHEMERAL
+        return jsonify({"type": CHANNEL_MESSAGE, "data": data})
+
+    if name == "photo-replace":
+        options = {o["name"]: o.get("value") for o in interaction["data"].get("options", [])}
+        tasks_queue.enqueue(
+            {
+                "kind": "photo_replace",
+                "token": interaction["token"],
+                "user": user,
+                "member_nick": (member or {}).get("nick"),
+                "username": _username(user),
+                "taken_on": str(options.get("date", "")).strip(),
+                "photo_url": _command_attachment_url(interaction, "photo"),
+            },
+            _self_url(),
+        )
+        return jsonify({"type": DEFERRED_CHANNEL_MESSAGE, "data": {"flags": EPHEMERAL}})
+
     if name == "day1":
         photo_url = _command_attachment_url(interaction, "photo")
         tasks_queue.enqueue(
@@ -531,6 +648,42 @@ def _handle_command(interaction: dict):
     return jsonify(
         {"type": CHANNEL_MESSAGE, "data": {"content": f"Unknown command `{name}`.", "flags": EPHEMERAL}}
     )
+
+
+def _handle_autocomplete(interaction: dict):
+    """Suggest the user's own archived photo dates for /photo-replace.
+
+    Shares the 3-second interaction deadline, so the Sheets read runs on the
+    same bounded pool as the modal prefill. A slow sheet yields an empty list —
+    the user can still type a date by hand — rather than a blown deadline.
+    """
+    user, _ = _interaction_user(interaction)
+    typed = ""
+    for opt in interaction["data"].get("options", []):
+        if opt.get("focused"):
+            typed = str(opt.get("value", "")).strip().lower()
+
+    choices: list[dict] = []
+    try:
+        import sheets
+
+        future = _prefill_pool.submit(sheets.get_photo_log, user["id"])
+        photos = future.result(timeout=PREFILL_TIMEOUT_S)
+        # Newest first: replacing a recent photo is the common case.
+        for p in reversed(photos):
+            # Match a leading "2026-0..." the obvious way, but also let a bare
+            # "02" mean February — a plain substring test would match the "02"
+            # inside the year 2026 and suggest everything.
+            date = p["taken_on"].lower()
+            if typed and not (date.startswith(typed) or typed in date[5:]):
+                continue
+            label = f"{p['taken_on']}" + (" (Day 1)" if p["kind"] == "day1" else "")
+            choices.append({"name": label, "value": p["taken_on"]})
+        choices = choices[:25]  # Discord's cap
+    except Exception as e:
+        log.warning("Autocomplete skipped: %s", e)
+
+    return jsonify({"type": AUTOCOMPLETE_RESULT, "data": {"choices": choices}})
 
 
 def _handle_modal_submit(interaction: dict):
@@ -628,6 +781,10 @@ def process_task():
             _task_set_baseline(payload)
         elif kind == "grant_consent":
             _task_grant_consent(payload)
+        elif kind == "collage":
+            _task_collage(payload)
+        elif kind == "photo_replace":
+            _task_photo_replace(payload)
         else:
             log.error("Unknown task kind: %s", kind)
     except Exception as e:
@@ -700,6 +857,40 @@ def _task_checkin_submit(payload: dict) -> None:
         discord_api.edit_original_response(payload["token"], _consent_prompt(user["id"]))
 
 
+def _archive_channel() -> str | None:
+    """The private bot-only channel that retains raw photos, if configured."""
+    return (os.environ.get("ARCHIVE_CHANNEL_ID") or "").strip() or None
+
+
+def _archive_photo(user: dict, username: str, png: bytes, taken_on: str,
+                   post_ref: str = "", kind: str = "progress") -> None:
+    """Retain a raw photo in the archive channel and log it.
+
+    Best-effort by design: the check-in and its public post have already
+    succeeded by the time this runs, and losing the archive copy must never
+    turn a successful check-in into a user-visible failure. A missing
+    ARCHIVE_CHANNEL_ID simply means the history features are switched off.
+    """
+    import sheets
+
+    channel = _archive_channel()
+    if not channel:
+        return
+    try:
+        msg = discord_api.post_channel_message(
+            channel,
+            {"content": f"{username} — {taken_on}"},
+            file_buf=io.BytesIO(png),
+            filename=f"{taken_on}.png",
+        )
+        sheets.append_photo_log(
+            user_id=user["id"], username=username, taken_on=taken_on,
+            archive_ref=str(msg["id"]), post_ref=post_ref, kind=kind,
+        )
+    except Exception as e:
+        log.warning("Photo archive skipped: %s", e)
+
+
 def _msg_date(msg: dict) -> str:
     """'Mon DD, YYYY' from a Discord message's ISO timestamp (best-effort)."""
     try:
@@ -722,6 +913,7 @@ def _post_progress_photo(user: dict, member: dict | None, photo_url: str) -> Non
     now_png = images.normalize(discord_api.download_image(photo_url))
     now_date = datetime.now(timezone.utc).strftime("%b %d, %Y")
 
+    taken_on = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     day1_ref = sheets.get_photo_state(user["id"])["day1_ref"]
     if not day1_ref:
         msg = discord_api.post_channel_message(
@@ -731,6 +923,8 @@ def _post_progress_photo(user: dict, member: dict | None, photo_url: str) -> Non
             filename="day1.png",
         )
         sheets.upsert_photo_state(user["id"], _username(user), day1_ref=str(msg["id"]))
+        _archive_photo(user, _username(user), now_png, taken_on,
+                       post_ref=str(msg["id"]), kind="day1")
         return
 
     day1_msg = discord_api.get_message(channel, day1_ref)
@@ -738,12 +932,16 @@ def _post_progress_photo(user: dict, member: dict | None, photo_url: str) -> Non
     composite = images.compose_before_after(
         day1_png, now_png, f"Day 1 — {_msg_date(day1_msg)}", f"Now — {now_date}"
     )
-    discord_api.post_channel_message(
+    msg = discord_api.post_channel_message(
         channel,
         {"embeds": [_build_before_after_embed(user, member)]},
         file_buf=composite,
         filename="beforeafter.png",
     )
+    # Archive the raw photo, not the composite — the collage needs individual
+    # panels, and the composite already contains a copy of Day 1.
+    _archive_photo(user, _username(user), now_png, taken_on,
+                   post_ref=str(msg.get("id", "")), kind="progress")
 
 
 def _task_set_baseline(payload: dict) -> None:
@@ -776,9 +974,149 @@ def _task_set_baseline(payload: dict) -> None:
         filename="day1.png",
     )
     sheets.upsert_photo_state(user["id"], payload["username"], day1_ref=str(msg["id"]))
+    _archive_photo(
+        user, payload["username"], now_png,
+        datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        post_ref=str(msg["id"]), kind="day1",
+    )
     discord_api.edit_original_response(
         token,
         {"content": "📸 Day 1 photo saved! Your next check-in photo will show your before & after."},
+    )
+
+
+def _fetch_archived_png(archive_ref: str) -> bytes | None:
+    """Re-fetch an archived photo's bytes via a fresh signed URL."""
+    channel = _archive_channel()
+    if not channel:
+        return None
+    try:
+        msg = discord_api.get_message(channel, archive_ref)
+        return discord_api.download_image(msg["attachments"][0]["url"])
+    except Exception as e:
+        log.warning("Archived photo %s unavailable: %s", archive_ref, e)
+        return None
+
+
+def _task_collage(payload: dict) -> None:
+    """/collage — a grid of the user's archived progress photos."""
+    import images
+    import sheets
+
+    user = payload["user"]
+    member = {"nick": payload.get("member_nick")} if payload.get("member_nick") else None
+    token = payload["token"]
+    name = discord_api.display_name(user, member)
+
+    if not _archive_channel():
+        discord_api.edit_original_response(
+            token, {"content": "⚠️ Photo history isn't set up yet (no archive channel configured)."}
+        )
+        return
+
+    photos = sheets.get_photo_log(user["id"])
+    if not photos:
+        discord_api.edit_original_response(
+            token,
+            {"content": "📭 No progress photos yet. Add one with `/checkin` and they'll show up here."},
+        )
+        return
+
+    chosen = images.sample_timeline(photos)
+    panels = []
+    for p in chosen:
+        png = _fetch_archived_png(p["archive_ref"])
+        if png:  # a single unreadable photo shouldn't sink the whole collage
+            panels.append((png, p["taken_on"]))
+
+    if not panels:
+        discord_api.edit_original_response(
+            token, {"content": "⚠️ Couldn't load your photos right now. Try again shortly."}
+        )
+        return
+
+    collage = images.render_collage(panels)
+    embed = {
+        "title": f"🖼️ Progress Collage — {name}",
+        "description": (
+            f"{len(panels)} photo{'s' if len(panels) != 1 else ''} "
+            f"from {panels[0][1]} to {panels[-1][1]}."
+        ),
+        "color": discord_api.COLOR_GREEN,
+        "image": {"url": "attachment://collage.png"},
+        "footer": {"text": f"Showing {len(panels)} of {len(photos)} photos."},
+    }
+    discord_api.edit_original_response(
+        token, {"embeds": [embed]}, file_buf=collage, filename="collage.png"
+    )
+
+
+def _task_photo_replace(payload: dict) -> None:
+    """/photo-replace — swap the photo stored for one date."""
+    import images
+    import sheets
+
+    user = payload["user"]
+    member = {"nick": payload.get("member_nick")} if payload.get("member_nick") else None
+    token = payload["token"]
+    taken_on = payload.get("taken_on") or ""
+    photo_url = payload.get("photo_url")
+
+    if not photo_url:
+        discord_api.edit_original_response(token, {"content": "⚠️ No photo received. Try again."})
+        return
+    if not _archive_channel():
+        discord_api.edit_original_response(
+            token, {"content": "⚠️ Photo history isn't set up yet (no archive channel configured)."}
+        )
+        return
+    if not sheets.get_photo_state(user["id"])["consent"]:
+        sheets.upsert_photo_state(user["id"], payload["username"], pending_url=photo_url)
+        discord_api.edit_original_response(token, _consent_prompt(user["id"]))
+        return
+
+    old = sheets.deactivate_photo_log_row(user["id"], taken_on)
+    if not old:
+        discord_api.edit_original_response(
+            token,
+            {"content": f"⚠️ No photo found for **{taken_on}**. Pick a date from the suggestions."},
+        )
+        return
+
+    # Remove the superseded copies — the bot's own messages, so no Manage
+    # Messages permission is involved. The archive copy goes first: if the
+    # public post's deletion fails, the log row is already inactive and a retry
+    # won't double-post.
+    discord_api.delete_message(_archive_channel(), old["archive_ref"])
+    if old["post_ref"]:
+        discord_api.delete_message(os.environ["CHECKIN_CHANNEL_ID"], old["post_ref"])
+
+    png = images.normalize(discord_api.download_image(photo_url))
+    pretty = _pretty_date(taken_on)
+    is_day1 = old["kind"] == "day1"
+    embed = (
+        _build_day1_embed(user, member, pretty)
+        if is_day1
+        else _build_replacement_embed(user, member, pretty)
+    )
+    # Filename must match the embed's attachment:// reference or Discord shows
+    # the embed with no image.
+    filename = "day1.png" if is_day1 else "progress.png"
+    msg = discord_api.post_channel_message(
+        os.environ["CHECKIN_CHANNEL_ID"],
+        {"embeds": [embed]},
+        file_buf=io.BytesIO(png),
+        filename=filename,
+    )
+    if is_day1:
+        # Keep the baseline pointer aimed at the new post, or before/after
+        # comparisons would re-fetch a message that no longer exists.
+        sheets.upsert_photo_state(user["id"], payload["username"], day1_ref=str(msg["id"]))
+
+    _archive_photo(user, payload["username"], png, taken_on,
+                   post_ref=str(msg["id"]), kind=old["kind"])
+    discord_api.edit_original_response(
+        token, {"content": f"✅ Replaced your photo for **{pretty}**."}
     )
 
 

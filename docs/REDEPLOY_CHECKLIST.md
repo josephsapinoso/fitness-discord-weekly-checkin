@@ -28,8 +28,12 @@ be done by hand in Discord).
         3.000s; a cold start without boost measured 3.006s and silently ate the
         first `/checkin` after an idle period.
       - No `env.yaml` edits required. Optional new vars `GOOGLE_PHOTOS_TAB`
-        (default `Photos`) and `MAX_IMAGE_BYTES` (default 10 MiB) only if you
-        want to override them.
+        (default `Photos`), `GOOGLE_PHOTO_LOG_TAB` (default `Photo Log`) and
+        `MAX_IMAGE_BYTES` (default 10 MiB) only if you want to override them.
+      - **`ARCHIVE_CHANNEL_ID`** enables `/collage` and `/photo-replace`. Create a
+        private channel only the bot can post in, copy its ID, and add it to
+        `env.yaml`. Left unset, those two commands reply "photo history isn't set
+        up" and everything else works normally.
       - No new dependencies — `requirements.txt` is unchanged (Pillow ships with
         matplotlib).
 - [ ] **3. Health check** — `curl https://YOUR-SERVICE-URL/` returns `ok`

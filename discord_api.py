@@ -117,6 +117,23 @@ def get_message(channel_id: int | str, message_id: int | str) -> dict:
     return resp.json()
 
 
+def delete_message(channel_id: int | str, message_id: int | str) -> bool:
+    """DELETE a channel message. Returns True if it's gone.
+
+    Only ever called on the bot's OWN messages, which needs no Manage Messages
+    permission. A 404 means someone already removed it by hand — that's the
+    desired end state, so it counts as success rather than an error.
+    """
+    url = f"{API_BASE}/channels/{channel_id}/messages/{message_id}"
+    resp = requests.delete(url, headers=_bot_headers(), timeout=30)
+    if resp.status_code == 404:
+        return True
+    if not resp.ok:
+        log.error("delete_message failed (%s): %s", resp.status_code, resp.text)
+        return False
+    return True
+
+
 # Reject anything larger than this before decoding (guards memory / decode bombs).
 MAX_IMAGE_BYTES = int(os.environ.get("MAX_IMAGE_BYTES", 10 * 1024 * 1024))
 _ALLOWED_IMAGE_TYPES = ("image/png", "image/jpeg", "image/webp")

@@ -34,6 +34,49 @@ COMMANDS = [
     },
     {"name": "history", "description": "Link to the full check-in history spreadsheet"},
     {
+        "name": "collage",
+        "description": "A grid of your progress photos over time",
+        "options": [
+            {
+                "type": 5,  # boolean
+                "name": "share",
+                "description": "Post publicly in the channel instead of just to you",
+                "required": False,
+            }
+        ],
+    },
+    {
+        "name": "howto",
+        "description": "How the weekly check-in works",
+        "options": [
+            {
+                "type": 5,  # boolean
+                "name": "share",
+                "description": "Post publicly so it can be pinned",
+                "required": False,
+            }
+        ],
+    },
+    {
+        "name": "photo-replace",
+        "description": "Replace the progress photo saved for a specific date",
+        "options": [
+            {
+                "type": 3,  # string
+                "name": "date",
+                "description": "Which photo to replace",
+                "required": True,
+                "autocomplete": True,
+            },
+            {
+                "type": 11,  # attachment
+                "name": "photo",
+                "description": "The replacement photo",
+                "required": True,
+            },
+        ],
+    },
+    {
         "name": "day1",
         "description": "Set your Day 1 baseline photo for before/after comparisons",
         "options": [
