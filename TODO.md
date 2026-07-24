@@ -53,18 +53,18 @@ Also added `--cpu-boost`: a cold start measured **3.006 s** against Discord's
 Weight 201 (derived from the sheet, not asked for), `Photos` tab created with consent
 recorded and `Day1 Ref` set, Day 1 photo posted.
 
-## 5. Create the photo archive channel — **outstanding**
+## ~~5. Create the photo archive channel~~ — done
 
-`/collage` and `/photo-replace` are deployed (revision `fitness-checkin-bot-00004-72n`)
-but inert until they have somewhere to retain raw photos. Until then they reply
-"photo history isn't set up"; everything else works normally.
+`#photo-archive` created as a private text channel (`@everyone` denied View; the
+`Fitness Check-in Bot` role granted View / Send / Attach Files / Read Message History,
+all verified via the API). `ARCHIVE_CHANNEL_ID` is set in `env.yaml` and `.env`, live
+as of revision **`fitness-checkin-bot-00005-prx`**. The `Photo Log` tab now exists in
+the sheet with its headers.
 
-1. Create a **private text channel** (e.g. `#photo-archive`) that only the bot can
-   see and post in.
-2. Copy its channel ID (right-click → Copy Channel ID, Developer Mode on).
-3. Add `ARCHIVE_CHANNEL_ID: "<id>"` to `env.yaml` and redeploy with
-   `./scripts/redeploy.sh`.
+`/collage` correctly reports "No progress photos yet" rather than "photo history isn't
+set up" — the read path is wired end to end.
 
-Note: photo history starts from that moment. Photos submitted before the archive
-existed were never retained as individual images — only the before/after composites
-were ever uploaded — so there is nothing to backfill.
+**Photo history starts now.** Photos submitted before the archive existed were never
+retained as individual images (only the before/after composites were ever uploaded),
+so there is nothing to backfill. The next `/checkin` with a photo writes the first
+`Photo Log` row, after which `/collage` and `/photo-replace` have data to work with.
