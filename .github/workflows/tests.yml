@@ -1,0 +1,30 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # cryptography backs the Ed25519 nacl stub the tests use; the rest come
+      # from requirements.txt (the tests stub Sheets / Cloud Tasks / Discord).
+      - name: Install dependencies
+        run: pip install -r requirements.txt cryptography
+
+      - name: Run tests
+        run: python tests/test_app.py
