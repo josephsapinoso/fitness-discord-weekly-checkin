@@ -262,9 +262,12 @@ Use Python 3.11–3.13; the pinned `numpy`/`matplotlib` versions have no 3.14 wh
 Discord requires acknowledgement within **3 seconds**. Causes:
 
 1. The service is erroring — check logs for a traceback.
-2. A cold start plus slow work exceeded the budget. Deferred commands (`/summary`,
-   `/progress`, `/day1`) should be immune since they ack immediately and do the work in
-   Cloud Tasks.
+2. A cold start exceeded the budget. Deferred commands (`/summary`, `/progress`,
+   `/day1`) are immune only once warm — the Cloud Tasks *enqueue* happens before the
+   ack, so on a cold process it is the enqueue that blows the deadline. Check that
+   the `fitness-bot-keep-warm` scheduler job is still firing (`gcloud scheduler jobs
+   describe fitness-bot-keep-warm --location us-west1`); a missed deadline also kills
+   the interaction token, which shows up in the logs as `Interaction token dead`.
 3. `TASK_SECRET` mismatch, so `/process` returns 403 and the followup never lands.
 
 ### Discord won't save the Interactions Endpoint URL
@@ -297,7 +300,7 @@ failure can never lose the written check-in. Check, in order:
 
 ### `/day1` doesn't appear in Discord
 
-Re-run `python register_commands.py` and confirm it prints **5** commands. This is the
+Re-run `python register_commands.py` and confirm it prints **8** commands. This is the
 easiest step to forget after deploying the photo feature. Global commands can take up to
 an hour to propagate.
 

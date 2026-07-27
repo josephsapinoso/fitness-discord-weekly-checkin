@@ -16,7 +16,7 @@ Deployed via `scripts/redeploy.sh` after installing the gcloud CLI locally
 
 `.env` now carries `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`, `TASK_SECRET`,
 `TASKS_LOCATION`, and `TASKS_QUEUE` (synced from `env.yaml`), so it matches
-`.env.example`. `register_commands.py` registered **5** commands, confirmed against
+`.env.example`. `register_commands.py` registered **8** commands, confirmed against
 the live Discord API: `/checkin`, `/summary`, `/history`, `/progress` (share),
 `/day1` (photo attachment).
 
@@ -39,19 +39,25 @@ recovered server-side from the sheet. Deployed as revision
 Also added `--cpu-boost`: a cold start measured **3.006 s** against Discord's
 **3.000 s** deadline, eating the first interaction after idle. Now **1.866 s** cold.
 
-## 4. Smoke test in Discord — partially done
+*(Correction, 2026-07-27: the "gunicorn + matplotlib import" attribution above was
+wrong — matplotlib is imported lazily and has never been on the `/interactions`
+path. See §6.)*
+
+## ~~4. Smoke test in Discord~~ — done, with one box that was never true
+
+Run on 2026-07-24. Verified: check-in row 16 logged with Starting Weight 201
+(derived from the sheet, not asked for), `Photos` tab created with consent recorded
+and `Day1 Ref` set, Day 1 photo posted.
 
 - [x] `/checkin` → modal shows all 5 fields including **"Progress photo (optional)"**,
       with Last Week's Weight prefilled from the sheet
-- [ ] Attach a photo + submit → one-time **"Share it 📸"** opt-in → tapping it posts a
+- [x] Attach a photo + submit → one-time **"Share it 📸"** opt-in → tapping it posts a
       **Day 1** message to the channel
-- [ ] A second `/checkin` with a photo → a **Before & After** composite posts
-- [ ] A **Photos** tab has appeared in the Google Sheet
-- [ ] `/checkin` with **no** photo still works exactly as before
-
-**Done** — you ran this on 2026-07-24. Verified: check-in row 16 logged with Starting
-Weight 201 (derived from the sheet, not asked for), `Photos` tab created with consent
-recorded and `Day1 Ref` set, Day 1 photo posted.
+- [x] A **Photos** tab has appeared in the Google Sheet
+- [x] `/checkin` with **no** photo still works exactly as before
+- [x] A second `/checkin` with a photo → a **Before & After** composite posts
+      — **never actually run when this was first ticked, and it was broken.**
+      Genuinely verified 2026-07-27 21:50 UTC. See §6.
 
 ## ~~5. Create the photo archive channel~~ — done
 
@@ -68,3 +74,59 @@ set up" — the read path is wired end to end.
 retained as individual images (only the before/after composites were ever uploaded),
 so there is nothing to backfill. The next `/checkin` with a photo writes the first
 `Photo Log` row, after which `/collage` and `/photo-replace` have data to work with.
+
+## ~~6. The before/after composite never worked~~ — fixed 2026-07-27
+
+A `/checkin` accepted the numbers (row written, 18:51 UTC) but never shared the photo:
+
+```
+File "/app/app.py", line 931, in _post_progress_photo
+    day1_png = discord_api.download_image(day1_msg["attachments"][0]["url"])
+IndexError: list index out of range
+```
+
+**Cause.** Uploading a file *and* referencing it from an embed as
+`attachment://day1.png` makes Discord **fold the file into the embed and leave
+`attachments` empty**. So `attachments[0]` never existed on any Day 1 post — the
+first photo (which posts a Day 1) always worked, and every photo after it died.
+Verified against the live API: both members' stored Day 1 messages report **0
+attachments** with a live `embeds[0].image.url`, while archive-channel messages
+(posted with no embed) do carry a real attachment.
+
+The tests missed it because the fixture hand-built a message shape Discord never
+returns. That fixture now models the real shape, and reproduces the `IndexError`
+against the old code.
+
+**Fix.** `_message_image_url()` resolves either shape, and `_day1_png()` prefers the
+raw PNG behind the `Photo Log` archive ref, falls back to the embed image (which is
+what recovers baselines predating the Photo Log), and if neither can be read posts
+the new photo as a fresh Day 1 instead of failing the check-in.
+
+- [x] **Verified end to end 2026-07-27 21:50 UTC.** `/checkin` with a photo posted
+      `🔥 Before & After — JoeLotto` to the check-in channel, and the first
+      `Photo Log` row for that user was written (`kind=progress`, archived,
+      active). Deployed as revision **`fitness-checkin-bot-00006-c66`**.
+
+## ~~7. Cold starts were silently eating interactions~~ — fixed 2026-07-27
+
+Separate bug, same day. `/interactions` took **4.379 s** (18:10) and **3.893 s**
+(18:45) against Discord's hard **3.000 s** deadline, because the service scales to
+zero and is evicted after ~15 min idle. A missed deadline also *invalidates the
+interaction token*, so the follow-up died with
+`404 {"message": "Unknown Webhook", "code": 10015}` — a `/day1` photo was parked as
+`pending_url` and its "Share it 📸" button never arrived. `/process` then tried to
+apologise on the same dead token and swallowed that failure too, so the member saw
+nothing at all.
+
+**Not matplotlib.** It is imported lazily and only ever from `/process`. The cost was
+`tasks_queue.enqueue()` building a `CloudTasksClient()` **per request** — gRPC import,
+ADC resolution and a TLS handshake, ~2.5 s cold — plus a second ADC lookup because
+`GOOGLE_CLOUD_PROJECT` was not in `env.yaml`. It also explains the warm split: 0.68 s
+for commands that enqueue vs 0.087 s for those that don't.
+
+**Fix.** The client is now built once per process and cached (with one rebuild-and-retry
+in case CPU throttling froze the channel), `GOOGLE_CLOUD_PROJECT` is set, `GET /` warms
+the client and the Sheets stack, and a Cloud Scheduler job pings `GET /` every minute so
+the warm-up is paid by a request nobody is waiting on. A dead token now falls back to a
+DM, and then to a deliberately content-free public nudge that doesn't reveal that a photo
+was attached.

@@ -112,7 +112,27 @@ pip install requests python-dotenv
 python register_commands.py
 ```
 
-## 6. Weekly reminder via Cloud Scheduler
+## 6. Keep-warm ping via Cloud Scheduler
+
+Cloud Run scales to zero and evicts the instance after ~15 minutes idle. Discord's
+interaction deadline is a hard **3.000 s**, and a cold start measured 3.9-4.4 s on
+2026-07-27 — so the first command after a quiet period was lost, *and* its
+interaction token was invalidated, taking the follow-up with it.
+
+One scheduled request per minute keeps an instance alive. `GET /` also primes the
+Cloud Tasks client and the Sheets stack on its first call, so that cost is paid by a
+request nobody is waiting on rather than inside someone's `/checkin`:
+
+```bash
+gcloud scheduler jobs create http fitness-bot-keep-warm   --location=us-west1   --schedule="*/1 * * * *"   --time-zone="Etc/UTC"   --uri="https://YOUR-SERVICE-URL/"   --http-method=GET   --attempt-deadline=30s   --max-retry-attempts=1
+```
+
+No auth flags: the service is `--allow-unauthenticated` and `GET /` needs no secret
+(unlike `/reminder`). Cost stays $0 — Cloud Scheduler's free tier is 3 jobs and this
+is the second, and ~44k pings/month at ~0.1 vCPU-s each is about 2.4% of Cloud Run's
+free 180,000 vCPU-seconds.
+
+## 7. Weekly reminder via Cloud Scheduler
 
 The reminder used to be a loop inside the bot process; now Cloud Scheduler calls
 `/reminder` on a cron schedule. The old schedule was **Monday 09:00 UTC**:
@@ -141,7 +161,7 @@ Fire it once right now to test:
 gcloud scheduler jobs run weekly-checkin-reminder --location=us-west1
 ```
 
-## 7. Test checklist
+## 8. Test checklist
 
 In your Discord server:
 

@@ -39,7 +39,7 @@ be done by hand in Discord).
 - [ ] **3. Health check** — `curl https://YOUR-SERVICE-URL/` returns `ok`
 - [ ] **4. Register slash commands** — `python register_commands.py`
       (needs `.env` with `DISCORD_TOKEN` + `DISCORD_APPLICATION_ID`). Must print
-      **5** commands including `/day1`, or the command won't appear in Discord.
+      **8** commands including `/day1`, or the command won't appear in Discord.
 - [ ] **5. Grant Discord permissions (manual, in the Discord app)** — the bot needs
       **Attach Files** and **Read Message History** in the check-in channel.
       Without these the text check-in still posts but **photos silently fail**.

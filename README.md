@@ -11,6 +11,9 @@ free tier ($0/month)** as a Discord HTTP interactions endpoint — no always-on 
 - `/summary` — shows the last 5 check-ins in an embed with a link to the full sheet
 - `/progress` — your personal weight chart with All-Time / 6-Month / 30-Day buttons, overall loss, and pace (lbs/week trend); private by default, `share:true` posts it to the channel
 - `/history` — sends you the Google Sheet link privately
+- `/collage` — a grid of your archived progress photos over time
+- `/photo-replace` — swap the photo stored for a given date (with autocomplete)
+- `/howto` — a pinnable explainer for how the weekly check-in works
 - **Weekly reminder** — Cloud Scheduler posts a prompt every Monday at 9 AM UTC (configurable, no redeploy needed)
 
 ### Progress photos & before/after

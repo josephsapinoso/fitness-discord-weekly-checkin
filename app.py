@@ -13,11 +13,15 @@ Cloud Run's free tier:
                         weekly check-in prompt
   GET  /              — health check
 
-Commands (unchanged from the gateway version):
-  /checkin   — opens a modal to submit this week's check-in
-  /summary   — posts the latest check-ins for the group
-  /progress  — your personal weight chart (all-time / 6 months / 30 days)
-  /history   — link to the full Google Sheet
+Commands:
+  /checkin        — opens a modal to submit this week's check-in (+ optional photo)
+  /summary        — posts the latest check-ins for the group
+  /progress       — your personal weight chart (all-time / 6 months / 30 days)
+  /history        — link to the full Google Sheet
+  /day1           — set or replace your before/after baseline photo
+  /collage        — a grid of your archived progress photos
+  /photo-replace  — swap the photo stored for a given date
+  /howto          — a pinnable explainer for the weekly check-in
 """
 
 import concurrent.futures
@@ -506,8 +510,29 @@ def _username(user: dict) -> str:
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
+_warmed = False
+
+
 @app.get("/")
 def health():
+    """Health check, and the hook the keep-warm ping uses to prime the process.
+
+    Keeping an instance alive is not enough on its own: the Cloud Tasks client
+    and the Sheets stack are imported per process, and paying for them inside a
+    real interaction is what blows Discord's 3-second deadline. The scheduled
+    ping is the request that should absorb that cost, so it happens here — and
+    never at the expense of the health check itself.
+    """
+    global _warmed
+    if not _warmed:
+        _warmed = True
+        try:
+            import sheets  # noqa: F401  (gspread + google-auth import)
+            import tasks_queue
+
+            tasks_queue.warmup()
+        except Exception as e:
+            log.warning("Warm-up skipped: %s", e)
     return "ok", 200
 
 
@@ -558,7 +583,7 @@ def _handle_command(interaction: dict):
 
     if name == "summary":
         tasks_queue.enqueue(
-            {"kind": "summary", "token": interaction["token"]}, _self_url()
+            {"kind": "summary", "token": interaction["token"], "user": user}, _self_url()
         )
         return jsonify({"type": DEFERRED_CHANNEL_MESSAGE})
 
@@ -763,6 +788,56 @@ def _handle_component(interaction: dict):
 
 
 # ── Deferred work (called back by Cloud Tasks) ─────────────────────────────────
+def _photo_result_text(posted: str) -> str:
+    """The ephemeral confirmation for whichever photo post actually happened."""
+    if posted == "before_after":
+        return "✅ Check-in submitted — your **before & after** is up!"
+    if posted == "reset":
+        return (
+            "✅ Check-in submitted! Your old Day 1 photo couldn't be read any more, "
+            "so this one is your new **Day 1** — the next photo will show a before & after."
+        )
+    return "✅ Check-in submitted with your photo!"
+
+
+def _reply(token: str, user: dict | None, body: dict, file_buf=None, filename="progress.png") -> None:
+    """Answer a deferred interaction, falling back when its token is dead.
+
+    A missed 3-second ack permanently invalidates the interaction token, so the
+    reply — including a consent prompt the user is waiting on — would otherwise
+    vanish with only a stack trace to show for it. DM the user instead, and if
+    even that is closed, nudge them publicly.
+    """
+    try:
+        discord_api.edit_original_response(token, body, file_buf, filename)
+        return
+    except discord_api.DeadInteractionToken as e:
+        log.error("Interaction token dead (%s) for user %s — falling back to DM",
+                  e, (user or {}).get("id"))
+    except Exception:
+        log.exception("edit_original_response failed")
+        return
+
+    if not user:
+        return
+    try:
+        discord_api.send_dm(user["id"], body, file_buf, filename)
+        return
+    except Exception as e:
+        log.warning("DM fallback failed: %s", e)
+
+    # Last resort. Deliberately says nothing about a photo: the user may not have
+    # consented to anyone knowing they attached one.
+    try:
+        discord_api.post_channel_message(
+            os.environ["CHECKIN_CHANNEL_ID"],
+            {"content": f"<@{user['id']}> your last command didn't go through "
+                        f"(the bot was waking up) — please run it again 🙏"},
+        )
+    except Exception as e:
+        log.error("Channel fallback failed: %s", e)
+
+
 @app.post("/process")
 def process_task():
     _check_secret("X-Task-Secret")
@@ -791,12 +866,8 @@ def process_task():
         # Return 200 so Cloud Tasks does NOT retry — retries could double-write
         # check-ins to the sheet. Surface the error to the user instead.
         log.exception("Task %s failed: %s", kind, e)
-        try:
-            discord_api.edit_original_response(
-                token, {"content": "⚠️ Something went wrong. Please try again."}
-            )
-        except Exception:
-            pass
+        _reply(token, payload.get("user"),
+               {"content": "⚠️ Something went wrong. Please try again."})
     return "ok", 200
 
 
@@ -843,18 +914,16 @@ def _task_checkin_submit(payload: dict) -> None:
 
     photo_url = payload.get("photo_url")
     if not photo_url:
-        discord_api.edit_original_response(payload["token"], {"content": "✅ Check-in submitted!"})
+        _reply(payload["token"], user, {"content": "✅ Check-in submitted!"})
         return
 
     if sheets.get_photo_state(user["id"])["consent"]:
-        _post_progress_photo(user, member, photo_url)
-        discord_api.edit_original_response(
-            payload["token"], {"content": "✅ Check-in submitted with your photo!"}
-        )
+        posted = _post_progress_photo(user, member, photo_url)
+        _reply(payload["token"], user, {"content": _photo_result_text(posted)})
     else:
         # Hold the photo privately (Sheet) behind a one-time public-sharing opt-in.
         sheets.upsert_photo_state(user["id"], payload["username"], pending_url=photo_url)
-        discord_api.edit_original_response(payload["token"], _consent_prompt(user["id"]))
+        _reply(payload["token"], user, _consent_prompt(user["id"]))
 
 
 def _archive_channel() -> str | None:
@@ -899,12 +968,65 @@ def _msg_date(msg: dict) -> str:
         return "Day 1"
 
 
-def _post_progress_photo(user: dict, member: dict | None, photo_url: str) -> None:
+def _message_image_url(msg: dict) -> str | None:
+    """The image URL of a bot-posted photo message, whichever shape it is in.
+
+    Discord *moves* an uploaded file into the embed that references it via
+    ``attachment://``, leaving ``attachments`` empty — so a check-in-channel Day 1
+    keeps its photo at ``embeds[0].image.url``. Archive-channel messages are posted
+    without an embed and do keep a real attachment. Both are checked, so neither
+    call site can be broken by the other's shape.
+    """
+    for att in msg.get("attachments") or []:
+        if att.get("url"):
+            return att["url"]
+    for embed in msg.get("embeds") or []:
+        url = (embed.get("image") or {}).get("url")
+        if url:
+            return url
+    return None
+
+
+def _day1_png(user_id: str, day1_msg: dict) -> bytes | None:
+    """The user's Day 1 photo bytes, or None if it can no longer be recovered.
+
+    Preferred source is the raw PNG in the private archive channel; the embed on
+    the public Day 1 post is the fallback for users whose baseline predates the
+    Photo Log.
+    """
+    import sheets
+
+    try:
+        for entry in sheets.get_photo_log(user_id):
+            if entry["kind"] == "day1":
+                png = _fetch_archived_png(entry["archive_ref"])
+                if png:
+                    return png
+                break
+    except Exception as e:
+        log.warning("Photo Log lookup failed for %s: %s", user_id, e)
+
+    url = _message_image_url(day1_msg)
+    if not url:
+        log.warning("Day 1 message %s has no recoverable image", day1_msg.get("id"))
+        return None
+    try:
+        return discord_api.download_image(url)
+    except Exception as e:
+        log.warning("Day 1 image download failed: %s", e)
+        return None
+
+
+def _post_progress_photo(user: dict, member: dict | None, photo_url: str) -> str:
     """Post the user's photo as their Day 1 (first ever) or a Before/After.
 
     On the first photo, the posted message becomes the durable Day 1 reference.
     Thereafter, the stored Day 1 message is re-fetched (fresh signed URL) and
     composited against the new photo.
+
+    Returns what was posted: ``"day1"``, ``"before_after"``, or ``"reset"`` when
+    a stored baseline existed but its image could not be recovered, so this
+    photo became the new Day 1.
     """
     import images
     import sheets
@@ -915,7 +1037,20 @@ def _post_progress_photo(user: dict, member: dict | None, photo_url: str) -> Non
 
     taken_on = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     day1_ref = sheets.get_photo_state(user["id"])["day1_ref"]
-    if not day1_ref:
+
+    day1_msg = day1_png = None
+    if day1_ref:
+        try:
+            day1_msg = discord_api.get_message(channel, day1_ref)
+        except Exception as e:
+            # Deleted by hand, or the channel changed — treat as no baseline.
+            log.warning("Day 1 message %s unavailable: %s", day1_ref, e)
+        if day1_msg:
+            day1_png = _day1_png(user["id"], day1_msg)
+
+    if day1_png is None:
+        # No baseline, or the stored one can no longer be read: this photo
+        # becomes the new Day 1 rather than failing the whole check-in.
         msg = discord_api.post_channel_message(
             channel,
             {"embeds": [_build_day1_embed(user, member, now_date)]},
@@ -925,10 +1060,8 @@ def _post_progress_photo(user: dict, member: dict | None, photo_url: str) -> Non
         sheets.upsert_photo_state(user["id"], _username(user), day1_ref=str(msg["id"]))
         _archive_photo(user, _username(user), now_png, taken_on,
                        post_ref=str(msg["id"]), kind="day1")
-        return
+        return "reset" if day1_ref else "day1"
 
-    day1_msg = discord_api.get_message(channel, day1_ref)
-    day1_png = discord_api.download_image(day1_msg["attachments"][0]["url"])
     composite = images.compose_before_after(
         day1_png, now_png, f"Day 1 — {_msg_date(day1_msg)}", f"Now — {now_date}"
     )
@@ -942,6 +1075,7 @@ def _post_progress_photo(user: dict, member: dict | None, photo_url: str) -> Non
     # panels, and the composite already contains a copy of Day 1.
     _archive_photo(user, _username(user), now_png, taken_on,
                    post_ref=str(msg.get("id", "")), kind="progress")
+    return "before_after"
 
 
 def _task_set_baseline(payload: dict) -> None:
@@ -955,12 +1089,12 @@ def _task_set_baseline(payload: dict) -> None:
     token = payload["token"]
 
     if not photo_url:
-        discord_api.edit_original_response(token, {"content": "⚠️ No photo received. Try again."})
+        _reply(token, user, {"content": "⚠️ No photo received. Try again."})
         return
 
     if not sheets.get_photo_state(user["id"])["consent"]:
         sheets.upsert_photo_state(user["id"], payload["username"], pending_url=photo_url)
-        discord_api.edit_original_response(token, _consent_prompt(user["id"]))
+        _reply(token, user, _consent_prompt(user["id"]))
         return
 
     # Consented: post a fresh Day 1 and overwrite the stored reference.
@@ -979,8 +1113,8 @@ def _task_set_baseline(payload: dict) -> None:
         datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         post_ref=str(msg["id"]), kind="day1",
     )
-    discord_api.edit_original_response(
-        token,
+    _reply(
+        token, user,
         {"content": "📸 Day 1 photo saved! Your next check-in photo will show your before & after."},
     )
 
@@ -992,7 +1126,11 @@ def _fetch_archived_png(archive_ref: str) -> bytes | None:
         return None
     try:
         msg = discord_api.get_message(channel, archive_ref)
-        return discord_api.download_image(msg["attachments"][0]["url"])
+        url = _message_image_url(msg)
+        if not url:
+            log.warning("Archived photo %s has no image", archive_ref)
+            return None
+        return discord_api.download_image(url)
     except Exception as e:
         log.warning("Archived photo %s unavailable: %s", archive_ref, e)
         return None
@@ -1009,15 +1147,15 @@ def _task_collage(payload: dict) -> None:
     name = discord_api.display_name(user, member)
 
     if not _archive_channel():
-        discord_api.edit_original_response(
-            token, {"content": "⚠️ Photo history isn't set up yet (no archive channel configured)."}
+        _reply(
+            token, user, {"content": "⚠️ Photo history isn't set up yet (no archive channel configured)."}
         )
         return
 
     photos = sheets.get_photo_log(user["id"])
     if not photos:
-        discord_api.edit_original_response(
-            token,
+        _reply(
+            token, user,
             {"content": "📭 No progress photos yet. Add one with `/checkin` and they'll show up here."},
         )
         return
@@ -1030,8 +1168,8 @@ def _task_collage(payload: dict) -> None:
             panels.append((png, p["taken_on"]))
 
     if not panels:
-        discord_api.edit_original_response(
-            token, {"content": "⚠️ Couldn't load your photos right now. Try again shortly."}
+        _reply(
+            token, user, {"content": "⚠️ Couldn't load your photos right now. Try again shortly."}
         )
         return
 
@@ -1046,8 +1184,8 @@ def _task_collage(payload: dict) -> None:
         "image": {"url": "attachment://collage.png"},
         "footer": {"text": f"Showing {len(panels)} of {len(photos)} photos."},
     }
-    discord_api.edit_original_response(
-        token, {"embeds": [embed]}, file_buf=collage, filename="collage.png"
+    _reply(
+        token, user, {"embeds": [embed]}, file_buf=collage, filename="collage.png"
     )
 
 
@@ -1063,22 +1201,22 @@ def _task_photo_replace(payload: dict) -> None:
     photo_url = payload.get("photo_url")
 
     if not photo_url:
-        discord_api.edit_original_response(token, {"content": "⚠️ No photo received. Try again."})
+        _reply(token, user, {"content": "⚠️ No photo received. Try again."})
         return
     if not _archive_channel():
-        discord_api.edit_original_response(
-            token, {"content": "⚠️ Photo history isn't set up yet (no archive channel configured)."}
+        _reply(
+            token, user, {"content": "⚠️ Photo history isn't set up yet (no archive channel configured)."}
         )
         return
     if not sheets.get_photo_state(user["id"])["consent"]:
         sheets.upsert_photo_state(user["id"], payload["username"], pending_url=photo_url)
-        discord_api.edit_original_response(token, _consent_prompt(user["id"]))
+        _reply(token, user, _consent_prompt(user["id"]))
         return
 
     old = sheets.deactivate_photo_log_row(user["id"], taken_on)
     if not old:
-        discord_api.edit_original_response(
-            token,
+        _reply(
+            token, user,
             {"content": f"⚠️ No photo found for **{taken_on}**. Pick a date from the suggestions."},
         )
         return
@@ -1115,8 +1253,8 @@ def _task_photo_replace(payload: dict) -> None:
 
     _archive_photo(user, payload["username"], png, taken_on,
                    post_ref=str(msg["id"]), kind=old["kind"])
-    discord_api.edit_original_response(
-        token, {"content": f"✅ Replaced your photo for **{pretty}**."}
+    _reply(
+        token, user, {"content": f"✅ Replaced your photo for **{pretty}**."}
     )
 
 
@@ -1132,11 +1270,30 @@ def _task_grant_consent(payload: dict) -> None:
     sheets.upsert_photo_state(user["id"], payload["username"], consent=True)
 
     if state["pending_url"]:
-        _post_progress_photo(user, member, state["pending_url"])
+        try:
+            _post_progress_photo(user, member, state["pending_url"])
+        except Exception as e:
+            # Discord photo links are short-lived. Clear the dead reference either
+            # way, or consent is recorded, the button is gone, and the stale URL
+            # sits in the sheet forever with no way to retry.
+            log.warning("Pending photo unusable: %s", e)
+            sheets.upsert_photo_state(user["id"], payload["username"], pending_url="")
+            _reply(
+                token, user,
+                {
+                    "content": (
+                        "✅ Sharing is on — but that photo's link had already expired "
+                        "(Discord photo links are short-lived). Send it again with "
+                        "`/day1` or your next `/checkin` and it'll post."
+                    ),
+                    "components": [],
+                },
+            )
+            return
         sheets.upsert_photo_state(user["id"], payload["username"], pending_url="")
 
-    discord_api.edit_original_response(
-        token,
+    _reply(
+        token, user,
         {
             "content": "✅ Shared! Your photos will now appear with your check-ins. 💪",
             "components": [],
@@ -1147,14 +1304,15 @@ def _task_grant_consent(payload: dict) -> None:
 def _task_summary(payload: dict) -> None:
     import sheets
 
+    user = payload.get("user")
     records = sheets.get_latest_checkins(limit=10)
     if not records:
-        discord_api.edit_original_response(
-            payload["token"],
+        _reply(
+            payload["token"], user,
             {"content": "No check-ins logged yet. Be the first with `/checkin`!"},
         )
         return
-    discord_api.edit_original_response(payload["token"], {"embeds": [_build_summary_embed(records)]})
+    _reply(payload["token"], user, {"embeds": [_build_summary_embed(records)]})
 
 
 def _task_progress(payload: dict) -> None:
@@ -1166,8 +1324,8 @@ def _task_progress(payload: dict) -> None:
 
     history = sheets.get_user_history(user["id"])
     if len(history) < 2:
-        discord_api.edit_original_response(
-            payload["token"],
+        _reply(
+            payload["token"], user,
             {
                 "content": (
                     "You need at least **2 check-ins** to chart progress. "
@@ -1188,7 +1346,7 @@ def _task_progress(payload: dict) -> None:
     }
     if chart_buf is None:
         body["attachments"] = []  # clear any previous chart
-    discord_api.edit_original_response(payload["token"], body, file_buf=chart_buf)
+    _reply(payload["token"], user, body, file_buf=chart_buf)
 
 
 # ── Weekly reminder (called by Cloud Scheduler) ────────────────────────────────

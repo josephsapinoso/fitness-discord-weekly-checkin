@@ -40,9 +40,16 @@ os.environ.update(
         "DISCORD_APPLICATION_ID": "111222333",
         "CHECKIN_CHANNEL_ID": "999888777",
         "GOOGLE_SHEET_ID": "SHEET123",
+        "GOOGLE_CLOUD_PROJECT": "test-project",
         "TASK_SECRET": "s3cret",
         "PREFILL_TIMEOUT_S": "0.5",
         "SELF_URL": "https://example.run.app",
+        # Set, but empty: _archive_channel() reads that as unconfigured, which the
+        # archive-off checks below require. It has to be *present* rather than
+        # absent because both app.py and register_commands.py call load_dotenv(),
+        # which fills in missing keys — so a developer's real .env would otherwise
+        # decide whether this suite passes. CI has no .env; locally there is one.
+        "ARCHIVE_CHANNEL_ID": "",
     }
 )
 
@@ -440,6 +447,17 @@ check("every registered command is handled in app.py",
 check("every handled command is registered",
       handled <= set(by_name), str(handled - set(by_name)))
 
+# The docs have twice been left claiming a stale command count, which reads as a
+# failed deploy to anyone following the checklist. Pin them to the real number.
+_count = len(register_commands.COMMANDS)
+for _doc in ("TODO.md", "docs/REDEPLOY_CHECKLIST.md", "docs/OPERATIONS_GUIDE.md",
+             "docs/SETUP_GUIDE.md", "scripts/redeploy.sh"):
+    _txt = open(os.path.join(ROOT, *_doc.split("/")), encoding="utf-8").read()
+    _stale = [n for n in range(1, 21) if n != _count
+              and (f"**{n}** commands" in _txt or f"{n} commands" in _txt
+                   or f"(must print **{n}**)" in _txt)]
+    check(f"{_doc} states the real command count", not _stale, f"claims {_stale}, is {_count}")
+
 
 # ── 10. Progress photos: modal upload, /day1, consent, before/after ────────────
 from PIL import Image as _PILImage  # noqa: E402
@@ -553,9 +571,14 @@ discord_api.edit_original_response = (
     lambda token, payload, file_buf=None, filename="progress.png": calls["edit"].append((token, payload, file_buf))
 )
 discord_api.download_image = lambda url: TINY_PNG
+# Discord's real shape for a Day 1 post: uploading a file *and* referencing it
+# from an embed via attachment:// moves the file into the embed and leaves
+# `attachments` empty. Modelling this wrongly is what hid the IndexError at
+# _post_progress_photo for every before/after until 2026-07-27.
 discord_api.get_message = lambda cid, mid: {
     "id": mid, "timestamp": "2026-01-01T00:00:00+00:00",
-    "attachments": [{"url": "https://cdn/day1-fresh.png"}],
+    "attachments": [],
+    "embeds": [{"title": "📸 Day 1", "image": {"url": "https://cdn/day1-fresh.png"}}],
 }
 app_module.discord_api = discord_api
 
@@ -606,7 +629,7 @@ _ba = calls["post"][1]
 check("before/after embed + filename", _ba[1]["embeds"][0]["title"].startswith("🔥 Before & After")
       and _ba[3] == "beforeafter.png")
 check("before/after real PNG", _ba[2] is not None and _ba[2].getvalue()[:8] == b"\x89PNG\r\n\x1a\n")
-check("consented photo confirm", "photo" in calls["edit"][-1][1]["content"])
+check("consented photo confirm", "before & after" in calls["edit"][-1][1]["content"].lower())
 
 # (d) /day1 consented → posts Day 1 and overwrites the stored reference
 photo_state.update({"consent": True, "day1_ref": "old-ref", "pending_url": None})
@@ -747,6 +770,202 @@ client.post("/process", json={"kind": "photo_replace", "token": "tok-r4", "user"
 check("replace unconsented → no deletes", deleted == [])
 check("replace unconsented → consent button",
       calls["edit"][-1][1]["components"][0]["components"][0]["custom_id"] == "photo_consent:42")
+
+# ── Day 1 image resolution ─────────────────────────────────────────────────────
+# The 2026-07-27 outage: a Day 1 post keeps its photo in the embed, not in
+# `attachments`, so reading attachments[0] raised IndexError and *every*
+# before/after died. Cover each source the composite can come from.
+check("resolves an embed image", app_module._message_image_url(
+    {"attachments": [], "embeds": [{"image": {"url": "https://cdn/e.png"}}]}) == "https://cdn/e.png")
+check("resolves a real attachment", app_module._message_image_url(
+    {"attachments": [{"url": "https://cdn/a.png"}], "embeds": []}) == "https://cdn/a.png")
+check("no image → None", app_module._message_image_url({"attachments": [], "embeds": [{}]}) is None)
+check("missing keys → None", app_module._message_image_url({}) is None)
+
+# (a) Archive ref preferred: the raw PNG beats the embed's re-encoded copy.
+fetched: list = []
+_photo_log_snapshot = list(photo_log)  # restored below; later checks rely on it
+photo_state.update({"consent": True, "day1_ref": "day1-msg", "pending_url": None})
+photo_log.clear()
+photo_log.append({"taken_on": "2026-01-01", "archive_ref": "arch-1", "post_ref": "p1", "kind": "day1"})
+_real_get = discord_api.get_message
+
+
+def tracking_get(cid, mid):
+    fetched.append(str(mid))
+    return _real_get(cid, mid)
+
+
+discord_api.get_message = tracking_get
+app_module.discord_api = discord_api
+calls["post"].clear(); calls["edit"].clear()
+client.post("/process", json=checkin_photo_payload(), headers={"X-Task-Secret": "s3cret"})
+check("before/after uses the archived Day 1", "arch-1" in fetched)
+check("before/after posted from archive",
+      any(p[1].get("embeds", [{}])[0].get("title", "").startswith("🔥 Before & After")
+          for p in calls["post"]))
+
+# (b) No Photo Log row (a baseline predating the archive) → falls back to the embed.
+photo_log.clear()
+calls["post"].clear(); calls["edit"].clear()
+client.post("/process", json=checkin_photo_payload(), headers={"X-Task-Secret": "s3cret"})
+check("before/after falls back to the embed image",
+      any(p[1].get("embeds", [{}])[0].get("title", "").startswith("🔥 Before & After")
+          for p in calls["post"]))
+check("embed fallback confirms before & after",
+      "before & after" in calls["edit"][-1][1]["content"].lower())
+
+# (c) Baseline unreadable → becomes a new Day 1 instead of raising.
+discord_api.get_message = lambda cid, mid: {
+    "id": mid, "timestamp": "2026-01-01T00:00:00+00:00", "attachments": [], "embeds": [],
+}
+app_module.discord_api = discord_api
+calls["post"].clear(); calls["edit"].clear(); upserts.clear()
+resp = client.post("/process", json=checkin_photo_payload(), headers={"X-Task-Secret": "s3cret"})
+check("unreadable baseline → still 200", resp.status_code == 200)
+check("unreadable baseline → posts a fresh Day 1",
+      any(p[1].get("embeds", [{}])[0].get("title", "").startswith("📸 Day 1") for p in calls["post"]))
+check("unreadable baseline → day1_ref replaced",
+      any(f.get("day1_ref") == "stored-1" for (_, _, f) in upserts))
+check("unreadable baseline → user told it reset",
+      "new **Day 1**" in calls["edit"][-1][1]["content"])
+
+discord_api.get_message = _real_get
+app_module.discord_api = discord_api
+
+# ── Dead interaction token ─────────────────────────────────────────────────────
+# Missing Discord's 3s ack permanently invalidates the token, so the reply — and
+# any consent button riding on it — has to reach the user another way.
+check("404/10015 is a dead token", discord_api._is_dead_token(404, {"code": 10015}))
+check("401/50027 is a dead token", discord_api._is_dead_token(401, {"code": 50027}))
+check("404/other is not a dead token", not discord_api._is_dead_token(404, {"code": 10008}))
+check("429 is not a dead token", not discord_api._is_dead_token(429, {}))
+check("no body is not a dead token", not discord_api._is_dead_token(404, None))
+
+dms: list = []
+_live_edit = discord_api.edit_original_response
+
+
+def dead_edit(token, payload, file_buf=None, filename="progress.png"):
+    raise discord_api.DeadInteractionToken("404/10015")
+
+
+discord_api.edit_original_response = dead_edit
+discord_api.send_dm = (
+    lambda uid, payload, file_buf=None, filename="progress.png": dms.append((str(uid), payload))
+)
+app_module.discord_api = discord_api
+
+# The exact 18:45 incident: /day1 on a cold start, unconsented.
+photo_state.update({"consent": False, "day1_ref": None, "pending_url": None})
+calls["post"].clear(); calls["edit"].clear(); upserts.clear(); dms.clear()
+resp = client.post("/process", json={"kind": "set_baseline", "token": "tok-dead", "user": USER,
+                                     "member_nick": None, "username": "joe",
+                                     "photo_url": "https://cdn/att-1.png"},
+                   headers={"X-Task-Secret": "s3cret"})
+check("dead token → still 200", resp.status_code == 200)
+check("dead token → pending photo still stashed",
+      any(f.get("pending_url") == "https://cdn/att-1.png" for (_, _, f) in upserts))
+check("dead token → consent prompt delivered by DM", len(dms) == 1 and dms[0][0] == "42")
+check("dead token → DM keeps the working button",
+      dms[0][1]["components"][0]["components"][0]["custom_id"] == "photo_consent:42")
+
+# The text check-in must survive a dead token even though the photo reply can't.
+photo_state.update({"consent": False, "day1_ref": None, "pending_url": None})
+calls["post"].clear(); dms.clear()
+client.post("/process", json=checkin_photo_payload(), headers={"X-Task-Secret": "s3cret"})
+check("dead token → check-in embed still posts",
+      any(p[1].get("embeds", [{}])[0].get("title", "").startswith("Weekly Check-in")
+          for p in calls["post"]))
+check("dead token → user still reached by DM", len(dms) == 1)
+
+# DMs closed → a public nudge that reveals nothing about a photo.
+def dm_blocked(uid, payload, file_buf=None, filename="progress.png"):
+    raise RuntimeError("Cannot send messages to this user")
+
+
+discord_api.send_dm = dm_blocked
+app_module.discord_api = discord_api
+photo_state.update({"consent": False, "day1_ref": None, "pending_url": None})
+calls["post"].clear(); dms.clear()
+client.post("/process", json={"kind": "set_baseline", "token": "tok-dead2", "user": USER,
+                              "member_nick": None, "username": "joe",
+                              "photo_url": "https://cdn/att-1.png"},
+            headers={"X-Task-Secret": "s3cret"})
+_nudges = [p for p in calls["post"] if "<@42>" in str(p[1].get("content", ""))]
+check("DM blocked → public nudge sent", len(_nudges) == 1)
+check("public nudge keeps the photo private",
+      "photo" not in _nudges[0][1]["content"].lower() and "components" not in _nudges[0][1])
+
+# A transient Discord 500 is NOT a dead token: no DM, no public nudge.
+def flaky_edit(token, payload, file_buf=None, filename="progress.png"):
+    raise RuntimeError("500 Server Error")
+
+
+discord_api.edit_original_response = flaky_edit
+discord_api.send_dm = (
+    lambda uid, payload, file_buf=None, filename="progress.png": dms.append((str(uid), payload))
+)
+app_module.discord_api = discord_api
+calls["post"].clear(); dms.clear()
+client.post("/process", json={"kind": "summary", "token": "tok-flaky", "user": USER},
+            headers={"X-Task-Secret": "s3cret"})
+check("transient error → no DM", dms == [])
+check("transient error → no public nudge",
+      not any("<@42>" in str(p[1].get("content", "")) for p in calls["post"]))
+
+discord_api.edit_original_response = _live_edit
+app_module.discord_api = discord_api
+
+# ── Expired pending photo on consent ───────────────────────────────────────────
+# Consent must not be recorded while a dead URL stays parked in the sheet: the
+# button is gone by then, so nothing would ever retry it.
+_live_download = discord_api.download_image
+
+
+def gone(url):
+    raise RuntimeError("410 Gone")
+
+
+discord_api.download_image = gone
+app_module.discord_api = discord_api
+photo_state.update({"consent": False, "day1_ref": None, "pending_url": "https://cdn/expired.png"})
+calls["post"].clear(); calls["edit"].clear(); upserts.clear()
+resp = client.post("/process", json={"kind": "grant_consent", "token": "tok-exp", "user": USER,
+                                     "member_nick": None, "username": "joe"},
+                   headers={"X-Task-Secret": "s3cret"})
+check("expired pending → still 200", resp.status_code == 200)
+check("expired pending → consent still recorded", any(f.get("consent") is True for (_, _, f) in upserts))
+check("expired pending → stale URL cleared", any(f.get("pending_url") == "" for (_, _, f) in upserts))
+check("expired pending → explains how to retry", "/day1" in calls["edit"][-1][1]["content"])
+check("expired pending → nothing posted publicly", len(calls["post"]) == 0)
+
+discord_api.download_image = _live_download
+app_module.discord_api = discord_api
+
+# ── Cloud Tasks client is built once per process, not per interaction ──────────
+# ~2.5s of gRPC import + ADC + TLS on a cold process is most of Discord's 3s
+# budget; paying it per request is what made cold /checkin time out.
+_builds = []
+tasks_queue._client = None
+_orig_get_client = tasks_queue._get_client
+
+
+def counting_get_client():
+    if tasks_queue._client is None:
+        _builds.append(1)
+        tasks_queue._client = object()
+    return tasks_queue._client
+
+
+tasks_queue._get_client = counting_get_client
+tasks_queue._get_client(); tasks_queue._get_client(); tasks_queue._get_client()
+check("Cloud Tasks client built once", len(_builds) == 1)
+tasks_queue._get_client = _orig_get_client
+tasks_queue._client = None
+check("warmup() is callable off the request path", callable(tasks_queue.warmup))
+
+photo_log.clear(); photo_log.extend(_photo_log_snapshot)
 
 # Autocomplete: type 8, newest first, filtered by what's typed, capped at 25.
 def ac_interaction(typed: str) -> dict:
