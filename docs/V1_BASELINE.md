@@ -1,7 +1,11 @@
 # Version 1 — the frozen baseline
 
-**Tag:** `v1.0.0` · **Branch:** `v1` · **Deployed as:** `fitness-checkin-bot-00010-m8c`
-· **Date:** 2026-07-27
+**Tag:** `v1.0.0` · **Branch:** `v1` · **Date:** 2026-07-27
+
+Every deploy labels its Cloud Run revision with the commit it was built from, so the
+revision running v1 is discoverable rather than recorded here and left to rot — see
+[Path A](#path-a--shift-traffic-to-the-v1-revision-fast-reversible). `scripts/check_deployed.sh`
+reports whether production matches `main` at any moment.
 
 This is the complete, working state of the bot before v2 work begins. It exists so v1 can
 be reasoned about and returned to without archaeology. **Rollback runbook is at the
@@ -151,12 +155,25 @@ a broken working tree.
 
 ### Path A — shift traffic to the v1 revision (fast, reversible)
 
-Cloud Run keeps old revisions. Sending traffic back is instant:
+Cloud Run keeps old revisions, and every deploy stamps its revision with the commit it was
+built from — so find the one built from the v1 tag rather than trusting a number written
+here:
+
+```bash
+V1_SHA=$(git rev-parse v1.0.0)
+gcloud run revisions list --service=fitness-checkin-bot --region=us-west1 \
+  --format="value(metadata.name)" \
+  --filter="metadata.labels.commit=$V1_SHA"
+```
+
+Then send all traffic to it:
 
 ```bash
 gcloud run services update-traffic fitness-checkin-bot \
-  --region=us-west1 --to-revisions=fitness-checkin-bot-00010-m8c=100
+  --region=us-west1 --to-revisions=<that-revision>=100
 ```
+
+If that returns nothing, the revision has been garbage-collected — use Path B.
 
 Confirm, then check health:
 
