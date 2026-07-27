@@ -958,6 +958,16 @@ check("transient error → no public nudge",
 discord_api.edit_original_response = _live_edit
 app_module.discord_api = discord_api
 
+# An unrecognised task kind must still answer. The interaction is already
+# deferred by the time /process runs, so returning silently leaves the user
+# staring at "thinking…" until Discord gives up.
+calls["edit"].clear()
+resp = client.post("/process", json={"kind": "no-such-kind", "token": "tok-unknown", "user": USER},
+                   headers={"X-Task-Secret": "s3cret"})
+check("unknown task kind → still 200", resp.status_code == 200)
+check("unknown task kind → user gets an answer",
+      len(calls["edit"]) == 1 and "went wrong" in calls["edit"][-1][1]["content"])
+
 # ── Expired pending photo on consent ───────────────────────────────────────────
 # Consent must not be recorded while a dead URL stays parked in the sheet: the
 # button is gone by then, so nothing would ever retry it.
