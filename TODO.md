@@ -153,3 +153,57 @@ the client and the Sheets stack, and a Cloud Scheduler job pings `GET /` every m
 the warm-up is paid by a request nobody is waiting on. A dead token now falls back to a
 DM, and then to a deliberately content-free public nudge that doesn't reveal that a photo
 was attached.
+
+**Measured after the fix (2026-07-27 23:33 UTC).** Keep-warm paused, instance left to be
+evicted for idleness (booted 23:17:09, shut down 23:32:17 — a genuine ~15 min idle
+eviction), then probed with a deliberately-wrong `X-Task-Secret` so the 403 returns right
+after Flask boots and no warm-up work is mixed into the number:
+
+| | server-side latency |
+|---|---|
+| Cold boot → first response | **1.680 s** |
+| Warm | **0.004 s** |
+
+Against Discord's 3.000 s deadline that is **1.32 s of headroom**, versus the 3.893 s and
+4.379 s overruns measured that morning. `_interaction_budget()` (§3c) then sizes the
+prefill to what's left, so a cold `/checkin` opens an unprefilled modal rather than
+missing the deadline.
+
+## ~~8. Deferred consent did the wrong thing~~ — fixed 2026-07-27
+
+A photo attached *before* opting into sharing is parked in the Photos tab and posted when
+the member taps **Share it 📸**. Only the URL was kept, so the consent handler inferred the
+action from state — and inferred wrong:
+
+| Command | Asked for | Actually happened on consent |
+|---|---|---|
+| `/day1` | **reset** the baseline | posted a **before & after** — the opposite — baseline unchanged |
+| `/photo-replace <date>` | replace **that date** | posted as a new photo **dated today**; the date kept its old photo |
+
+Only reachable for a member who has not consented yet, which is why it went unnoticed —
+both current members consented on their first photo.
+
+**Fix.** Store the intent with the photo (`Pending Kind` = `checkin`/`day1`/`replace`, plus
+`Pending Date`) and dispatch on it. The consented bodies of `/day1` and `/photo-replace`
+are extracted into `_set_day1_baseline()` and `_replace_photo()`, so a deferred opt-in runs
+the same code as an immediate one instead of a second implementation that drifts.
+
+**Schema migration.** `_get_photos_sheet()` used to `insert_row` on *any* header mismatch,
+which for an added column would have pushed every row down one and left the old header
+being read as a member record. It now extends the header when the existing one is a prefix.
+Run and verified against the live sheet: `col_count` 6 → 8, every pre-migration cell
+preserved in place, idempotent, both members' consent and baselines intact.
+
+## ~~9. Production kept drifting from `main`~~ — guarded 2026-07-27
+
+It happened twice in one day, in both directions: PR #3 was merged and then **never
+deployed** (still true three hours later, while the bug it fixed was being investigated),
+then a deploy from a stale working tree shipped *without* it. Neither was detectable —
+`gcloud run deploy --source .` ships the working tree and nothing recorded which commit
+that was.
+
+- `scripts/redeploy.sh` refuses a dirty tree or a `HEAD` that isn't `origin/main`
+- deploys stamp the revision with `--labels commit=<sha>`
+- `scripts/check_deployed.sh` answers "is prod running main?" on demand and names the
+  undeployed commits. This is the one that catches merged-but-never-deployed, where no
+  deploy runs at all so no deploy-time hook can fire. Exit 0 in sync, 1 drifted, 2 unknown.
