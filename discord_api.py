@@ -63,6 +63,25 @@ def _multipart(payload: dict, file_buf: io.BytesIO | None, filename: str):
     }
 
 
+class DeadInteractionToken(Exception):
+    """The interaction webhook is gone — its 3s ack was missed, or it expired.
+
+    Distinguished from a generic HTTP error because it is not retryable and not
+    the user's fault: the reply has to be delivered some other way.
+    """
+
+
+# Unknown Webhook (never acked / expired) and Invalid Webhook Token.
+_DEAD_TOKEN_CODES = (10015, 50027)
+
+
+def _is_dead_token(status: int, body: dict | None) -> bool:
+    """Whether a failed interaction-webhook call means the token is unusable."""
+    if status not in (401, 404):
+        return False
+    return (body or {}).get("code") in _DEAD_TOKEN_CODES
+
+
 def edit_original_response(
     interaction_token: str,
     payload: dict,
@@ -78,7 +97,36 @@ def edit_original_response(
     resp = requests.patch(url, timeout=30, **_multipart(payload, file_buf, filename))
     if not resp.ok:
         log.error("edit_original_response failed (%s): %s", resp.status_code, resp.text)
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        if _is_dead_token(resp.status_code, body):
+            raise DeadInteractionToken(f"{resp.status_code}/{(body or {}).get('code')}")
     resp.raise_for_status()
+
+
+def send_dm(
+    user_id: int | str,
+    payload: dict,
+    file_buf: io.BytesIO | None = None,
+    filename: str = "progress.png",
+) -> dict:
+    """Open (or reuse) the user's DM channel and post there via the bot token.
+
+    Used when a deferred reply can no longer reach its interaction. Buttons keep
+    working in DMs, so a consent prompt delivered this way is still actionable.
+    """
+    resp = requests.post(
+        f"{API_BASE}/users/@me/channels",
+        headers=_bot_headers(),
+        json={"recipient_id": str(user_id)},
+        timeout=30,
+    )
+    if not resp.ok:
+        log.error("open DM failed (%s): %s", resp.status_code, resp.text)
+    resp.raise_for_status()
+    return post_channel_message(resp.json()["id"], payload, file_buf, filename)
 
 
 def post_channel_message(

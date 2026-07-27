@@ -25,11 +25,35 @@ def _project_id() -> str:
     return project
 
 
+_client: object | None = None
+
+
+def _get_client():
+    """The process-wide Cloud Tasks client, built once.
+
+    Constructing one costs ~2.5s on a cold process — importing grpc, resolving
+    ADC and opening a TLS channel — which is most of Discord's 3-second
+    interaction deadline. It has to happen once per process, not once per call.
+    """
+    global _client
+    if _client is None:
+        from google.cloud import tasks_v2
+
+        _client = tasks_v2.CloudTasksClient()
+    return _client
+
+
+def warmup() -> None:
+    """Pay the client-construction cost off the interaction deadline."""
+    _get_client()
+
+
 def enqueue(payload: dict, self_url: str) -> None:
     """Enqueue a POST to {self_url}/process carrying `payload` as JSON."""
+    global _client
     from google.cloud import tasks_v2
 
-    client = tasks_v2.CloudTasksClient()
+    client = _get_client()
     parent = client.queue_path(
         _project_id(),
         os.environ.get("TASKS_LOCATION", "us-west1"),
@@ -46,5 +70,12 @@ def enqueue(payload: dict, self_url: str) -> None:
             "body": json.dumps(payload).encode(),
         }
     }
-    client.create_task(request={"parent": parent, "task": task})
+    try:
+        client.create_task(request={"parent": parent, "task": task})
+    except Exception as e:
+        # Cloud Run throttles CPU to ~0 between requests, which can leave a
+        # long-idle gRPC channel stale. Rebuild once and retry before giving up.
+        log.warning("create_task failed (%s) — rebuilding client and retrying", e)
+        _client = None
+        _get_client().create_task(request={"parent": parent, "task": task})
     log.info("Enqueued task kind=%s", payload.get("kind"))

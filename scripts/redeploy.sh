@@ -25,11 +25,11 @@ step() { printf '\n\033[1;36m▶ %s\033[0m\n' "$1"; }
 
 cd "$(dirname "$0")/.."   # repo root, regardless of where this is invoked from
 
-step "1/5  Sync merged code (main)"
+step "1/6  Sync merged code (main)"
 git checkout main
 git pull origin main
 
-step "2/5  Deploy to Cloud Run  ($SERVICE / $REGION)"
+step "2/6  Deploy to Cloud Run  ($SERVICE / $REGION)"
 if [ ! -f env.yaml ]; then
   echo "ERROR: env.yaml not found. Copy env.yaml.example to env.yaml and fill it in." >&2
   exit 1
@@ -39,9 +39,12 @@ fi
 # are unchanged (Pillow already ships with matplotlib), so this just rebuilds the
 # container with the new code.
 # --cpu-boost: Discord discards any interaction response that takes more than
-# 3.000s, and a cold start (gunicorn + matplotlib import) measured 3.006s —
-# just over the line, so the first /checkin after an idle period was lost.
-# Startup CPU boost buys that back while still scaling to zero when idle.
+# 3.000s, and cold starts measured 3.9-4.4s on 2026-07-27, so the first
+# interaction after an idle period was lost. The cost was NOT matplotlib (it is
+# imported lazily and only from /process) but tasks_queue building a
+# CloudTasksClient per request; that client is now cached per process and GET /
+# warms it. Startup CPU boost covers the rest, and the fitness-bot-keep-warm
+# Cloud Scheduler job keeps an instance alive so cold starts stay rare.
 gcloud run deploy "$SERVICE" \
   --source . \
   --region "$REGION" \
@@ -55,15 +58,25 @@ gcloud run deploy "$SERVICE" \
 URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"
 echo "Service URL: $URL"
 
-step "3/5  Health check"
+step "3/6  Health check"
 curl -fsS "$URL/" && echo "  -> ok"
 
-step "4/5  Register slash commands (adds /day1)"
+step "4/6  Register slash commands (adds /day1)"
 # Needs a local .env with DISCORD_TOKEN + DISCORD_APPLICATION_ID.
-# Should print 5 commands: /checkin, /summary, /progress, /history, /day1
+# Should print 8 commands: /checkin, /summary, /progress, /history, /day1,
+#                          /collage, /howto, /photo-replace
 python register_commands.py
 
-step "5/5  MANUAL — grant the bot two Discord permissions"
+step "5/6  Verify the keep-warm job still exists"
+# Created once via docs/GCP_DEPLOY.md; without it, cold starts blow Discord's
+# 3.000s interaction deadline and the first command after idle is silently lost.
+if gcloud scheduler jobs describe fitness-bot-keep-warm --location "$REGION"      --format='value(state)' 2>/dev/null; then
+  echo "  -> keep-warm job present"
+else
+  echo "  !! MISSING: fitness-bot-keep-warm — see docs/GCP_DEPLOY.md section 6"
+fi
+
+step "6/6  MANUAL — grant the bot two Discord permissions"
 cat <<'EOF'
 This step is NOT automatable via gcloud — do it in the Discord app:
 

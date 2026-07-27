@@ -179,7 +179,7 @@ The full first-time procedure lives in **[GCP_DEPLOY.md](GCP_DEPLOY.md)**. In ou
 4. `gcloud run deploy fitness-checkin-bot --source . --env-vars-file env.yaml ...`
 5. Set the **Interactions Endpoint URL** in the Discord Developer Portal to
    `https://YOUR-SERVICE-URL/interactions`. Discord validates it before saving.
-6. Register the slash commands: `python register_commands.py` (must print **5**).
+6. Register the slash commands: `python register_commands.py` (must print **8**).
 7. Create the Cloud Scheduler job that POSTs to `/reminder` every Monday.
 
 Steps 5 and 7 have no equivalent in a gateway bot — Discord needs to know where to send
