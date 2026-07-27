@@ -577,13 +577,16 @@ resp = signed_post(
 check("consent button (not owner) → ignored", resp.get_json()["type"] == 6 and enqueued[-1][0]["kind"] == "grant_consent")
 
 # ── Photo /process tasks — stub Sheet photo-state and Discord image IO ──────────
-photo_state = {"consent": False, "day1_ref": None, "pending_url": None}
+photo_state = {"consent": False, "day1_ref": None, "pending_url": None,
+               "pending_kind": None, "pending_date": None}
 
 
 def fake_get_photo_state(uid):
     s = dict(photo_state)
     s["day1_ref"] = s["day1_ref"] or None
     s["pending_url"] = s["pending_url"] or None
+    s["pending_kind"] = s.get("pending_kind") or None
+    s["pending_date"] = s.get("pending_date") or None
     return s
 
 
@@ -967,6 +970,92 @@ resp = client.post("/process", json={"kind": "no-such-kind", "token": "tok-unkno
 check("unknown task kind → still 200", resp.status_code == 200)
 check("unknown task kind → user gets an answer",
       len(calls["edit"]) == 1 and "went wrong" in calls["edit"][-1][1]["content"])
+
+# ── Deferred consent honours the original intent ───────────────────────────────
+# Consent granted later used to guess what to do from state alone, and guessed
+# wrong: a parked /day1 posted a before/after instead of resetting the baseline,
+# and a parked /photo-replace lost its date and posted as a photo for today.
+
+# /day1 while unconsented records the intent, not just the URL.
+photo_state.update({"consent": False, "day1_ref": None, "pending_url": None,
+                    "pending_kind": None, "pending_date": None})
+calls["post"].clear(); calls["edit"].clear(); upserts.clear()
+client.post("/process", json={"kind": "set_baseline", "token": "tok-d1", "user": USER,
+                              "member_nick": None, "username": "joe",
+                              "photo_url": "https://cdn/new-baseline.png"},
+            headers={"X-Task-Secret": "s3cret"})
+check("/day1 unconsented → records kind=day1",
+      any(f.get("pending_kind") == "day1" for (_, _, f) in upserts))
+
+# Granting consent must reset the baseline — NOT post a before/after, even
+# though a readable day1_ref exists.
+photo_state.update({"consent": False, "day1_ref": "day1-msg",
+                    "pending_url": "https://cdn/new-baseline.png",
+                    "pending_kind": "day1", "pending_date": None})
+calls["post"].clear(); calls["edit"].clear(); upserts.clear()
+client.post("/process", json={"kind": "grant_consent", "token": "tok-c-d1", "user": USER,
+                              "member_nick": None, "username": "joe"},
+            headers={"X-Task-Secret": "s3cret"})
+_titles = [(p[1].get("embeds") or [{}])[0].get("title", "") for p in calls["post"]]
+check("consent on a parked /day1 → posts Day 1",
+      any(t.startswith("📸 Day 1") for t in _titles), str(_titles))
+check("consent on a parked /day1 → NOT a before/after",
+      not any(t.startswith("🔥 Before & After") for t in _titles), str(_titles))
+check("consent on a parked /day1 → baseline repointed",
+      any(f.get("day1_ref") == "stored-1" for (_, _, f) in upserts))
+check("consent on a parked /day1 → says Day 1 is set",
+      "Day 1" in calls["edit"][-1][1]["content"])
+check("consent on a parked /day1 → pending intent cleared",
+      any(f.get("pending_kind") == "" for (_, _, f) in upserts))
+
+# /photo-replace while unconsented keeps the target date with the photo.
+photo_state.update({"consent": False, "day1_ref": None, "pending_url": None,
+                    "pending_kind": None, "pending_date": None})
+os.environ["ARCHIVE_CHANNEL_ID"] = "555444333"
+upserts.clear()
+client.post("/process", json={"kind": "photo_replace", "token": "tok-r-nc", "user": USER,
+                              "member_nick": None, "username": "joe",
+                              "taken_on": "2026-02-01", "photo_url": "https://cdn/new.png"},
+            headers={"X-Task-Secret": "s3cret"})
+check("/photo-replace unconsented → records kind=replace",
+      any(f.get("pending_kind") == "replace" for (_, _, f) in upserts))
+check("/photo-replace unconsented → keeps the date",
+      any(f.get("pending_date") == "2026-02-01" for (_, _, f) in upserts))
+
+# Granting consent must replace THAT date, not post a new photo dated today.
+photo_log.clear()
+photo_log.extend([
+    {"taken_on": "2026-01-01", "archive_ref": "a1", "post_ref": "p1", "kind": "day1"},
+    {"taken_on": "2026-02-01", "archive_ref": "a2", "post_ref": "p2", "kind": "progress"},
+])
+photo_state.update({"consent": False, "day1_ref": None,
+                    "pending_url": "https://cdn/new.png",
+                    "pending_kind": "replace", "pending_date": "2026-02-01"})
+calls["post"].clear(); calls["edit"].clear(); deleted.clear()
+client.post("/process", json={"kind": "grant_consent", "token": "tok-c-r", "user": USER,
+                              "member_nick": None, "username": "joe"},
+            headers={"X-Task-Secret": "s3cret"})
+check("consent on a parked /photo-replace → old copies deleted",
+      ("555444333", "a2") in deleted and ("999888777", "p2") in deleted, str(deleted))
+check("consent on a parked /photo-replace → posts the replacement",
+      any((p[1].get("embeds") or [{}])[0].get("title", "").startswith("🔄 Updated photo")
+          for p in calls["post"]))
+check("consent on a parked /photo-replace → names the original date",
+      "Feb 01, 2026" in calls["edit"][-1][1]["content"], calls["edit"][-1][1]["content"])
+
+# A row written before Pending Kind existed still behaves as a check-in photo.
+photo_state.update({"consent": False, "day1_ref": None,
+                    "pending_url": "https://cdn/att-1.png",
+                    "pending_kind": None, "pending_date": None})
+calls["post"].clear(); calls["edit"].clear()
+client.post("/process", json={"kind": "grant_consent", "token": "tok-c-legacy", "user": USER,
+                              "member_nick": None, "username": "joe"},
+            headers={"X-Task-Secret": "s3cret"})
+check("legacy pending row → still posts as Day 1",
+      any((p[1].get("embeds") or [{}])[0].get("title", "").startswith("📸 Day 1")
+          for p in calls["post"]))
+
+os.environ["ARCHIVE_CHANNEL_ID"] = ""
 
 # ── Expired pending photo on consent ───────────────────────────────────────────
 # Consent must not be recorded while a dead URL stays parked in the sheet: the

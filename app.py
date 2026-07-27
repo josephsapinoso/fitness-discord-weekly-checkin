@@ -993,7 +993,10 @@ def _task_checkin_submit(payload: dict) -> None:
         _reply(payload["token"], user, {"content": _photo_result_text(posted)})
     else:
         # Hold the photo privately (Sheet) behind a one-time public-sharing opt-in.
-        sheets.upsert_photo_state(user["id"], payload["username"], pending_url=photo_url)
+        sheets.upsert_photo_state(
+            user["id"], payload["username"],
+            pending_url=photo_url, pending_kind="checkin", pending_date="",
+        )
         _reply(payload["token"], user, _consent_prompt(user["id"]))
 
 
@@ -1149,9 +1152,34 @@ def _post_progress_photo(user: dict, member: dict | None, photo_url: str) -> str
     return "before_after"
 
 
+def _set_day1_baseline(user: dict, member: dict | None, username: str, photo_url: str) -> None:
+    """Post a fresh Day 1 and overwrite the stored baseline reference.
+
+    Shared by `/day1` and by consent granted on a photo that `/day1` had parked,
+    so a deferred opt-in resets the baseline exactly like an immediate one.
+    """
+    import images
+    import sheets
+
+    channel = os.environ["CHECKIN_CHANNEL_ID"]
+    now_png = images.normalize(discord_api.download_image(photo_url))
+    now_date = datetime.now(timezone.utc).strftime("%b %d, %Y")
+    msg = discord_api.post_channel_message(
+        channel,
+        {"embeds": [_build_day1_embed(user, member, now_date)]},
+        file_buf=io.BytesIO(now_png),
+        filename="day1.png",
+    )
+    sheets.upsert_photo_state(user["id"], username, day1_ref=str(msg["id"]))
+    _archive_photo(
+        user, username, now_png,
+        datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        post_ref=str(msg["id"]), kind="day1",
+    )
+
+
 def _task_set_baseline(payload: dict) -> None:
     """/day1 — set or replace the user's Day 1 baseline photo."""
-    import images
     import sheets
 
     user = payload["user"]
@@ -1164,26 +1192,16 @@ def _task_set_baseline(payload: dict) -> None:
         return
 
     if not sheets.get_photo_state(user["id"])["consent"]:
-        sheets.upsert_photo_state(user["id"], payload["username"], pending_url=photo_url)
+        # Record *what* is pending, not just the URL — granting consent later
+        # must reset the baseline, not post a before/after.
+        sheets.upsert_photo_state(
+            user["id"], payload["username"],
+            pending_url=photo_url, pending_kind="day1", pending_date="",
+        )
         _reply(token, user, _consent_prompt(user["id"]))
         return
 
-    # Consented: post a fresh Day 1 and overwrite the stored reference.
-    channel = os.environ["CHECKIN_CHANNEL_ID"]
-    now_png = images.normalize(discord_api.download_image(photo_url))
-    now_date = datetime.now(timezone.utc).strftime("%b %d, %Y")
-    msg = discord_api.post_channel_message(
-        channel,
-        {"embeds": [_build_day1_embed(user, member, now_date)]},
-        file_buf=io.BytesIO(now_png),
-        filename="day1.png",
-    )
-    sheets.upsert_photo_state(user["id"], payload["username"], day1_ref=str(msg["id"]))
-    _archive_photo(
-        user, payload["username"], now_png,
-        datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        post_ref=str(msg["id"]), kind="day1",
-    )
+    _set_day1_baseline(user, member, payload["username"], photo_url)
     _reply(
         token, user,
         {"content": "📸 Day 1 photo saved! Your next check-in photo will show your before & after."},
@@ -1260,37 +1278,21 @@ def _task_collage(payload: dict) -> None:
     )
 
 
-def _task_photo_replace(payload: dict) -> None:
-    """/photo-replace — swap the photo stored for one date."""
+def _replace_photo(
+    user: dict, member: dict | None, username: str, taken_on: str, photo_url: str
+) -> str | None:
+    """Swap the archived photo for one date. Returns the pretty date, or None
+    when there is no active photo on that date.
+
+    Shared by `/photo-replace` and by consent granted on a photo it had parked,
+    so a deferred opt-in still replaces the date the user asked for.
+    """
     import images
     import sheets
 
-    user = payload["user"]
-    member = {"nick": payload.get("member_nick")} if payload.get("member_nick") else None
-    token = payload["token"]
-    taken_on = payload.get("taken_on") or ""
-    photo_url = payload.get("photo_url")
-
-    if not photo_url:
-        _reply(token, user, {"content": "⚠️ No photo received. Try again."})
-        return
-    if not _archive_channel():
-        _reply(
-            token, user, {"content": "⚠️ Photo history isn't set up yet (no archive channel configured)."}
-        )
-        return
-    if not sheets.get_photo_state(user["id"])["consent"]:
-        sheets.upsert_photo_state(user["id"], payload["username"], pending_url=photo_url)
-        _reply(token, user, _consent_prompt(user["id"]))
-        return
-
     old = sheets.deactivate_photo_log_row(user["id"], taken_on)
     if not old:
-        _reply(
-            token, user,
-            {"content": f"⚠️ No photo found for **{taken_on}**. Pick a date from the suggestions."},
-        )
-        return
+        return None
 
     # Remove the superseded copies — the bot's own messages, so no Manage
     # Messages permission is involved. The archive copy goes first: if the
@@ -1320,13 +1322,50 @@ def _task_photo_replace(payload: dict) -> None:
     if is_day1:
         # Keep the baseline pointer aimed at the new post, or before/after
         # comparisons would re-fetch a message that no longer exists.
-        sheets.upsert_photo_state(user["id"], payload["username"], day1_ref=str(msg["id"]))
+        sheets.upsert_photo_state(user["id"], username, day1_ref=str(msg["id"]))
 
-    _archive_photo(user, payload["username"], png, taken_on,
+    _archive_photo(user, username, png, taken_on,
                    post_ref=str(msg["id"]), kind=old["kind"])
-    _reply(
-        token, user, {"content": f"✅ Replaced your photo for **{pretty}**."}
-    )
+    return pretty
+
+
+def _task_photo_replace(payload: dict) -> None:
+    """/photo-replace — swap the photo stored for one date."""
+    import sheets
+
+    user = payload["user"]
+    member = {"nick": payload.get("member_nick")} if payload.get("member_nick") else None
+    token = payload["token"]
+    taken_on = payload.get("taken_on") or ""
+    photo_url = payload.get("photo_url")
+
+    if not photo_url:
+        _reply(token, user, {"content": "⚠️ No photo received. Try again."})
+        return
+    if not _archive_channel():
+        _reply(
+            token, user, {"content": "⚠️ Photo history isn't set up yet (no archive channel configured)."}
+        )
+        return
+    if not sheets.get_photo_state(user["id"])["consent"]:
+        # Keep the target date with the photo — without it, granting consent
+        # later posted the photo as a new entry dated today instead of replacing
+        # the date the user actually picked.
+        sheets.upsert_photo_state(
+            user["id"], payload["username"],
+            pending_url=photo_url, pending_kind="replace", pending_date=taken_on,
+        )
+        _reply(token, user, _consent_prompt(user["id"]))
+        return
+
+    pretty = _replace_photo(user, member, payload["username"], taken_on, photo_url)
+    if pretty is None:
+        _reply(
+            token, user,
+            {"content": f"⚠️ No photo found for **{taken_on}**. Pick a date from the suggestions."},
+        )
+        return
+    _reply(token, user, {"content": f"✅ Replaced your photo for **{pretty}**."})
 
 
 def _task_grant_consent(payload: dict) -> None:
@@ -1340,15 +1379,42 @@ def _task_grant_consent(payload: dict) -> None:
     state = sheets.get_photo_state(user["id"])
     sheets.upsert_photo_state(user["id"], payload["username"], consent=True)
 
+    done = "✅ Shared! Your photos will now appear with your check-ins. 💪"
     if state["pending_url"]:
         try:
-            _post_progress_photo(user, member, state["pending_url"])
+            # Honour whatever the user was actually doing when they attached the
+            # photo. Guessing from state alone got this wrong: a parked /day1
+            # posted a before/after instead of resetting the baseline, and a
+            # parked /photo-replace lost its date and posted as a photo for today.
+            kind = state.get("pending_kind")
+            if kind == "day1":
+                _set_day1_baseline(user, member, payload["username"], state["pending_url"])
+                done = "📸 Shared! Your Day 1 photo is set — the next one shows your before & after."
+            elif kind == "replace":
+                pretty = _replace_photo(
+                    user, member, payload["username"],
+                    state.get("pending_date") or "", state["pending_url"],
+                )
+                done = (
+                    f"✅ Shared, and replaced your photo for **{pretty}**."
+                    if pretty
+                    else "✅ Sharing is on — but that date no longer has a photo to replace. "
+                         "Try `/photo-replace` again."
+                )
+            else:
+                # "checkin", or blank for rows written before Pending Kind existed.
+                posted = _post_progress_photo(user, member, state["pending_url"])
+                if posted == "before_after":
+                    done = "✅ Shared! Your **before & after** is up. 💪"
         except Exception as e:
             # Discord photo links are short-lived. Clear the dead reference either
             # way, or consent is recorded, the button is gone, and the stale URL
             # sits in the sheet forever with no way to retry.
             log.warning("Pending photo unusable: %s", e)
-            sheets.upsert_photo_state(user["id"], payload["username"], pending_url="")
+            sheets.upsert_photo_state(
+                user["id"], payload["username"],
+                pending_url="", pending_kind="", pending_date="",
+            )
             _reply(
                 token, user,
                 {
@@ -1361,15 +1427,12 @@ def _task_grant_consent(payload: dict) -> None:
                 },
             )
             return
-        sheets.upsert_photo_state(user["id"], payload["username"], pending_url="")
+        sheets.upsert_photo_state(
+            user["id"], payload["username"],
+            pending_url="", pending_kind="", pending_date="",
+        )
 
-    _reply(
-        token, user,
-        {
-            "content": "✅ Shared! Your photos will now appear with your check-ins. 💪",
-            "components": [],
-        },
-    )
+    _reply(token, user, {"content": done, "components": []})
 
 
 def _task_summary(payload: dict) -> None:
