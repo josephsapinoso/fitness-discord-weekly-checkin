@@ -4,6 +4,12 @@ A Discord bot that posts weekly prompts, collects structured check-ins via a mod
 form, and logs everything to Google Sheets. Runs **serverless on Google Cloud Run's
 free tier ($0/month)** as a Discord HTTP interactions endpoint — no always-on server.
 
+> **Version 1 is frozen at tag [`v1.0.0`](../../releases/tag/v1.0.0)** (branch `v1`).
+> [docs/V1_BASELINE.md](docs/V1_BASELINE.md) documents that baseline — the commands, the
+> data model, the invariants not to break, and a **rollback runbook**. Read it before
+> starting v2 work; the invariants section covers three failure modes that look fine in
+> testing and break silently in production.
+
 ## Features
 
 - `/checkin` — opens a modal with all 5 fields **plus an optional progress photo**; posts a formatted embed to the channel and saves to Sheets
@@ -117,7 +123,8 @@ Endpoint URL — usually it's easier to just deploy.
 ├── requirements.txt
 ├── env.yaml.example       # Template for Cloud Run env vars (copy to env.yaml)
 ├── .env.example           # Template for local development env vars
-└── docs/GCP_DEPLOY.md     # Full deployment guide
+├── docs/GCP_DEPLOY.md     # Full deployment guide
+└── docs/V1_BASELINE.md    # Frozen v1 surface + rollback runbook
 ```
 
 ## Customization
