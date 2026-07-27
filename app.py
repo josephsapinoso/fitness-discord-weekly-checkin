@@ -928,7 +928,11 @@ def process_task():
         elif kind == "photo_replace":
             _task_photo_replace(payload)
         else:
+            # The interaction is already deferred, so returning without a reply
+            # leaves the user on "thinking…" forever. Always answer something.
             log.error("Unknown task kind: %s", kind)
+            _reply(token, payload.get("user"),
+                   {"content": "⚠️ Something went wrong. Please try again."})
     except Exception as e:
         # Return 200 so Cloud Tasks does NOT retry — retries could double-write
         # check-ins to the sheet. Surface the error to the user instead.
