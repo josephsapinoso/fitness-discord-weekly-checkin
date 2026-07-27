@@ -44,6 +44,12 @@ PHOTO_HEADERS = [
     "Day1 Ref",      # Discord message id holding the durable Day 1 photo
     "Pending URL",   # a not-yet-consented photo's (short-lived) signed CDN URL
     "Updated At",
+    # What the user was actually doing when they attached the pending photo.
+    # Without this, consent granted later can only guess, and it guessed wrong:
+    # a pending /day1 posted a before/after instead of resetting the baseline,
+    # and a pending /photo-replace lost its date and posted as a photo for today.
+    "Pending Kind",  # "checkin" | "day1" | "replace"  (blank = legacy/checkin)
+    "Pending Date",  # the /photo-replace target date, when Pending Kind=replace
 ]
 
 # One row per photo ever archived — the history the Photos tab (one row per
@@ -115,8 +121,21 @@ def _get_photos_sheet() -> gspread.Worksheet:
         )
         ws.append_row(PHOTO_HEADERS)
 
-    if ws.row_count == 0 or ws.row_values(1) != PHOTO_HEADERS:
-        ws.insert_row(PHOTO_HEADERS, 1)
+    existing = ws.row_values(1) if ws.row_count else []
+    if existing != PHOTO_HEADERS:
+        if existing and PHOTO_HEADERS[: len(existing)] == existing:
+            # An older, narrower schema. New columns are only ever appended on
+            # the right, so widening the header row keeps every existing row
+            # aligned — whereas insert_row would shove all the data down one row
+            # and leave the old header masquerading as a user record.
+            if ws.col_count < len(PHOTO_HEADERS):
+                ws.add_cols(len(PHOTO_HEADERS) - ws.col_count)
+            for col, header in enumerate(
+                PHOTO_HEADERS[len(existing):], start=len(existing) + 1
+            ):
+                ws.update_cell(1, col, header)
+        else:
+            ws.insert_row(PHOTO_HEADERS, 1)
 
     return ws
 
@@ -231,7 +250,12 @@ def deactivate_photo_log_row(user_id: int, taken_on: str) -> dict | None:
 
 
 def get_photo_state(user_id: int) -> dict:
-    """Return a user's photo state: {consent, day1_ref, pending_url}.
+    """A user's photo state: consent, Day 1 ref, and any pending photo.
+
+    ``pending_kind`` says what the user was doing when they attached the pending
+    photo ("checkin", "day1" or "replace"), and ``pending_date`` carries the
+    target date for a pending "replace". Rows written before those columns
+    existed report None, which callers treat as an ordinary check-in photo.
 
     Missing user / missing fields fall back to consent=False and None refs.
     """
@@ -241,7 +265,8 @@ def get_photo_state(user_id: int) -> dict:
         (r for r in records if str(r.get("User ID")) == str(user_id)), None
     )
     if not row:
-        return {"consent": False, "day1_ref": None, "pending_url": None}
+        return {"consent": False, "day1_ref": None, "pending_url": None,
+                "pending_kind": None, "pending_date": None}
 
     def _clean(value) -> str | None:
         s = str(value).strip()
@@ -251,6 +276,8 @@ def get_photo_state(user_id: int) -> dict:
         "consent": str(row.get("Consent", "")).strip().lower() == "yes",
         "day1_ref": _clean(row.get("Day1 Ref", "")),
         "pending_url": _clean(row.get("Pending URL", "")),
+        "pending_kind": _clean(row.get("Pending Kind", "")),
+        "pending_date": _clean(row.get("Pending Date", "")),
     }
 
 
@@ -258,7 +285,8 @@ def upsert_photo_state(user_id: int, username: str, **fields) -> None:
     """Create or update a user's row in the Photos tab.
 
     `fields` may include any of: consent (bool), day1_ref (str), pending_url
-    (str). Pass an empty string to clear a cell (e.g. pending_url="").
+    (str), pending_kind (str), pending_date (str). Pass an empty string to clear
+    a cell (e.g. pending_url="").
     """
     ws = _get_photos_sheet()
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -270,6 +298,10 @@ def upsert_photo_state(user_id: int, username: str, **fields) -> None:
         updates["Day1 Ref"] = fields["day1_ref"]
     if "pending_url" in fields:
         updates["Pending URL"] = fields["pending_url"]
+    if "pending_kind" in fields:
+        updates["Pending Kind"] = fields["pending_kind"]
+    if "pending_date" in fields:
+        updates["Pending Date"] = fields["pending_date"]
 
     # Locate the user's existing row (column 1 = User ID), else append a fresh one.
     cell = ws.find(str(user_id), in_column=1)
