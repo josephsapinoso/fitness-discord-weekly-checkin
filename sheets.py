@@ -14,10 +14,13 @@ Credentials are resolved in this order:
 
 import os
 import json
+import logging
 from datetime import datetime, timezone
 
 import gspread
 from google.oauth2.service_account import Credentials
+
+log = logging.getLogger(__name__)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -84,6 +87,46 @@ def _get_client() -> gspread.Client:
     return gspread.authorize(creds)
 
 
+def _ensure_headers(ws: gspread.Worksheet, headers: list[str]) -> None:
+    """Reconcile a worksheet's header row with `headers`, without moving data.
+
+    Columns are only ever appended on the right, so a header row that differs
+    only in length still has every shared column in the same position. Three
+    cases, and the last one is what makes a rollback safe:
+
+    * identical — nothing to do.
+    * sheet is NARROWER (an older sheet, newer code) — widen the header in
+      place. Inserting a row instead would push every record down one and leave
+      the old header being read as data.
+    * sheet is WIDER (a newer sheet, older code — i.e. someone rolled back after
+      a schema change) — leave it completely alone. The columns this build knows
+      about are still where it expects them, and the extra ones are ignored by
+      get_all_records(). Rewriting the header here would destroy the newer
+      columns' data and strand any rollback.
+
+    Anything else is an unrecognisable header, so insert a correct one.
+    """
+    existing = ws.row_values(1) if ws.row_count else []
+    if existing == headers:
+        return
+
+    if existing and headers[: len(existing)] == existing:
+        if ws.col_count < len(headers):
+            ws.add_cols(len(headers) - ws.col_count)
+        for col, header in enumerate(headers[len(existing):], start=len(existing) + 1):
+            ws.update_cell(1, col, header)
+        return
+
+    if existing[: len(headers)] == headers:
+        log.info(
+            "%s has %d extra column(s) from a newer schema — leaving them alone",
+            ws.title, len(existing) - len(headers),
+        )
+        return
+
+    ws.insert_row(headers, 1)
+
+
 def _get_sheet() -> gspread.Worksheet:
     """Open (or create) the worksheet."""
     client = _get_client()
@@ -98,10 +141,7 @@ def _get_sheet() -> gspread.Worksheet:
         ws = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=len(HEADERS))
         ws.append_row(HEADERS)
 
-    # Ensure headers exist if sheet is empty
-    if ws.row_count == 0 or ws.row_values(1) != HEADERS:
-        ws.insert_row(HEADERS, 1)
-
+    _ensure_headers(ws, HEADERS)
     return ws
 
 
@@ -121,22 +161,7 @@ def _get_photos_sheet() -> gspread.Worksheet:
         )
         ws.append_row(PHOTO_HEADERS)
 
-    existing = ws.row_values(1) if ws.row_count else []
-    if existing != PHOTO_HEADERS:
-        if existing and PHOTO_HEADERS[: len(existing)] == existing:
-            # An older, narrower schema. New columns are only ever appended on
-            # the right, so widening the header row keeps every existing row
-            # aligned — whereas insert_row would shove all the data down one row
-            # and leave the old header masquerading as a user record.
-            if ws.col_count < len(PHOTO_HEADERS):
-                ws.add_cols(len(PHOTO_HEADERS) - ws.col_count)
-            for col, header in enumerate(
-                PHOTO_HEADERS[len(existing):], start=len(existing) + 1
-            ):
-                ws.update_cell(1, col, header)
-        else:
-            ws.insert_row(PHOTO_HEADERS, 1)
-
+    _ensure_headers(ws, PHOTO_HEADERS)
     return ws
 
 
@@ -156,8 +181,7 @@ def _get_photo_log_sheet() -> gspread.Worksheet:
         )
         ws.append_row(PHOTO_LOG_HEADERS)
 
-    if ws.row_count == 0 or ws.row_values(1) != PHOTO_LOG_HEADERS:
-        ws.insert_row(PHOTO_LOG_HEADERS, 1)
+    _ensure_headers(ws, PHOTO_LOG_HEADERS)
 
     return ws
 

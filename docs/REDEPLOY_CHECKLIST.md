@@ -1,5 +1,9 @@
 # Redeploy checklist — progress-photos change
 
+> Rolling **back** rather than forward? Use the runbook in
+> [V1_BASELINE.md](V1_BASELINE.md#rollback-runbook) — the fast path is a Cloud Run
+> traffic shift, and it lists the command re-registration step that is easy to miss.
+
 To-do list for pushing the **progress pictures + `/day1` + before/after** feature
 (merged in PR #1) to the live bot. This is a **code-only redeploy of an existing
 Cloud Run service** — the one-time infrastructure (APIs, Cloud Tasks queue,

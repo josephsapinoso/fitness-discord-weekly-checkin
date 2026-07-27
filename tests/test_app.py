@@ -971,6 +971,65 @@ check("unknown task kind → still 200", resp.status_code == 200)
 check("unknown task kind → user gets an answer",
       len(calls["edit"]) == 1 and "went wrong" in calls["edit"][-1][1]["content"])
 
+# ── Sheet headers reconcile without moving data ────────────────────────────────
+# The rollback guarantee lives here. If v2 adds a column and someone reverts to
+# an older build, that build must NOT rewrite the header — doing so destroys the
+# newer columns and pushes every record down a row.
+class _FakeWS:
+    def __init__(self, header, cols=None):
+        self.header = list(header)
+        self.row_count = 1 if header else 0
+        self.col_count = cols if cols is not None else len(header)
+        self.title = "Fake"
+        self.inserted = []
+        self.updated = []
+        self.added_cols = 0
+
+    def row_values(self, n):
+        return list(self.header)
+
+    def insert_row(self, values, index):
+        self.inserted.append((list(values), index))
+
+    def update_cell(self, row, col, value):
+        self.updated.append((row, col, value))
+        while len(self.header) < col:
+            self.header.append("")
+        self.header[col - 1] = value
+
+    def add_cols(self, n):
+        self.added_cols += n
+        self.col_count += n
+
+
+_H = ["A", "B", "C"]
+
+_ws = _FakeWS(_H)
+sheets._ensure_headers(_ws, _H)
+check("headers identical → untouched", not _ws.inserted and not _ws.updated)
+
+_ws = _FakeWS(["A", "B"], cols=2)
+sheets._ensure_headers(_ws, _H)
+check("sheet narrower → header widened in place, no row inserted",
+      _ws.updated == [(1, 3, "C")] and not _ws.inserted)
+check("sheet narrower → grid widened", _ws.added_cols == 1)
+
+# The rollback case.
+_ws = _FakeWS(["A", "B", "C", "D", "E"], cols=5)
+sheets._ensure_headers(_ws, _H)
+check("sheet wider (rolled-back build) → left completely alone",
+      not _ws.inserted and not _ws.updated and _ws.header == ["A", "B", "C", "D", "E"])
+
+_ws = _FakeWS(["totally", "different"])
+sheets._ensure_headers(_ws, _H)
+check("unrecognisable header → a correct one is inserted",
+      _ws.inserted == [(_H, 1)])
+
+_ws = _FakeWS([])
+sheets._ensure_headers(_ws, _H)
+check("empty sheet → header inserted", _ws.inserted == [(_H, 1)])
+
+
 # ── Deferred consent honours the original intent ───────────────────────────────
 # Consent granted later used to guess what to do from state alone, and guessed
 # wrong: a parked /day1 posted a before/after instead of resetting the baseline,
