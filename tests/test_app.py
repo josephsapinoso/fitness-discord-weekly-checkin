@@ -171,6 +171,47 @@ check("slow prefill → no values", "value" not in rows["last_week_weight"])
 # recover Starting Weight, so leaving slow_prefill bound would add 3s per task.
 sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs")
 
+
+# Cold-start guard: a modal can't be deferred, so it must reach Discord inside
+# the 3s interaction window. On a cold Cloud Run start the container boot alone
+# eats most of that budget before the handler runs — stacking a Sheets read on
+# top overran the deadline and surfaced as "The application did not respond".
+# X-Signature-Timestamp lets us see how much of the 3s is already gone; when
+# it's spent, the modal must open immediately WITHOUT the prefill read, even if
+# the stub is instant.
+def stale_signed_post(body: dict, age_s: int):
+    raw = json.dumps(body)
+    ts = str(int(time.time()) - age_s)  # sign with a timestamp `age_s` in the past
+    sig = PRIVATE_KEY.sign(f"{ts}{raw}".encode()).hex()
+    return client.post(
+        "/interactions",
+        data=raw,
+        content_type="application/json",
+        headers={"X-Signature-Ed25519": sig, "X-Signature-Timestamp": ts},
+    )
+
+
+_calls = {"n": 0}
+
+
+def counting_prefill(uid):
+    _calls["n"] += 1
+    return ("200 lbs", "190 lbs")
+
+
+sheets.get_user_prefill = counting_prefill
+resp = stale_signed_post(cmd_interaction("checkin"), age_s=5)  # 5s ago → past the 3s deadline
+modal = resp.get_json()
+stale_rows = {
+    r["component"]["custom_id"]: r["component"]
+    for r in modal["data"]["components"]
+    if r["component"]["type"] == 4
+}
+check("cold start → modal still opens", modal["type"] == 9)
+check("cold start → prefill skipped, no value", "value" not in stale_rows["last_week_weight"])
+check("cold start → sheet not even read", _calls["n"] == 0)
+sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs")
+
 # ── 3. Deferred commands enqueue tasks ─────────────────────────────────────────
 enqueued.clear()
 resp = signed_post(cmd_interaction("summary"))

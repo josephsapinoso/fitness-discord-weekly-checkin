@@ -41,7 +41,30 @@ Also added `--cpu-boost`: a cold start measured **3.006 s** against Discord's
 
 *(Correction, 2026-07-27: the "gunicorn + matplotlib import" attribution above was
 wrong — matplotlib is imported lazily and has never been on the `/interactions`
-path. See §6.)*
+path. See §7.)*
+
+## ~~3c. `/checkin` "did not respond" again on cold starts~~ — fixed
+
+Recurred **2026-07-27**: a check-in ~9 h after the 2 AM reminder hit a cold
+(scaled-to-zero) instance and failed with "The application did not respond". The
+modal can't be deferred, and the inline prefill Sheets read was bounded only by
+`PREFILL_TIMEOUT_S` (1.4 s) — which counts *after* the handler starts. A ~1.9 s
+cold boot **plus** that 1.4 s read (**plus** an unbounded first-time `import
+sheets`) overran the 3 s window. The 07-24 smoke test passed only because the
+instance was warm.
+
+Fixed by sizing the read to the time actually left: `X-Signature-Timestamp`
+tells us when Discord sent the interaction, so `now − that` is how much of the
+3 s is already gone (cold boot included). `_interaction_budget()` bounds the
+read to the remainder (minus a ship-the-reply margin) and skips it entirely when
+spent, so the modal always opens in time — degrading to "no prefill" instead of
+failing. The heavy `import sheets` also moved into the timed worker so its cold
+cost is bounded too. Same guard applied to `/photo-replace` autocomplete.
+Regression test added (stale-timestamp `/checkin` → modal opens, sheet not read).
+
+This bounded the *prefill read* correctly, but the cold start itself was still
+~2.5 s of per-request Cloud Tasks client construction — see §7, which removes that
+cost and keeps an instance warm so the budget is rarely tight in the first place.
 
 ## ~~4. Smoke test in Discord~~ — done, with one box that was never true
 

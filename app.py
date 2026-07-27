@@ -29,6 +29,7 @@ import io
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -65,6 +66,64 @@ EPHEMERAL = 64
 # Discord gives us only 3 seconds to open a modal, and modals can't be deferred)
 _prefill_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 PREFILL_TIMEOUT_S = float(os.environ.get("PREFILL_TIMEOUT_S", "1.4"))
+
+# Discord's hard interaction deadline. A modal (and an autocomplete result)
+# can't be deferred, so the response has to reach Discord within this window.
+INTERACTION_DEADLINE_S = 3.0
+# Time reserved to serialize and ship our response back to Discord after the
+# Sheets read finishes; keeps the read from spending the whole budget.
+RESPONSE_MARGIN_S = float(os.environ.get("RESPONSE_MARGIN_S", "0.6"))
+# Below this, an inline Sheets read isn't worth attempting — open the modal /
+# return autocomplete immediately rather than risk overrunning the deadline.
+MIN_PREFILL_BUDGET_S = float(os.environ.get("MIN_PREFILL_BUDGET_S", "0.25"))
+
+
+def _interaction_budget() -> float:
+    """Seconds we can safely spend on an inline (non-deferrable) Sheets read.
+
+    ``PREFILL_TIMEOUT_S`` alone isn't enough: it bounds only the work done once
+    this handler is running, but on a cold Cloud Run start (this bot scales to
+    zero) the container boot can eat most of Discord's 3-second budget *before*
+    the handler is even entered. A 1.4s read stacked on a ~1.9s cold start
+    overran the deadline and surfaced to users as "The application did not
+    respond".
+
+    Discord's ``X-Signature-Timestamp`` marks when it sent the interaction, so
+    ``now - that`` is how much of the 3 seconds has already elapsed (cold start
+    included). Bound the read to whatever remains, minus a margin to ship the
+    reply, capped at the configured timeout. Returns 0 when no time is left.
+    """
+    ts = request.headers.get("X-Signature-Timestamp", "")
+    try:
+        elapsed = time.time() - int(ts)
+    except (ValueError, TypeError):
+        # No usable timestamp (shouldn't happen post-verification) — fall back
+        # to the fixed timeout rather than skip the prefill outright.
+        return PREFILL_TIMEOUT_S
+    # A negative value means our clock trails Discord's; assume none is gone.
+    elapsed = max(0.0, elapsed)
+    remaining = INTERACTION_DEADLINE_S - elapsed - RESPONSE_MARGIN_S
+    return max(0.0, min(PREFILL_TIMEOUT_S, remaining))
+
+
+def _prefill_last_week(user_id: str):
+    """Worker for the /checkin modal prefill (import kept off the hot path).
+
+    Importing ``sheets`` pulls in gspread + google-auth, which on a cold start
+    is itself slow; doing it here means that cost is covered by the caller's
+    ``future.result(timeout=...)`` bound instead of running unbounded on the
+    critical path before the modal can open.
+    """
+    import sheets
+
+    return sheets.get_user_prefill(user_id)
+
+
+def _photo_log_worker(user_id: str):
+    """Worker for the /photo-replace autocomplete read (see _prefill_last_week)."""
+    import sheets
+
+    return sheets.get_photo_log(user_id)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -569,16 +628,22 @@ def _handle_command(interaction: dict):
     user, member = _interaction_user(interaction)
 
     if name == "checkin":
-        # Modals can't be deferred, so the prefill Sheets read gets a hard
-        # time budget; on a slow/cold read the modal opens without prefill.
+        # Modals can't be deferred, so the prefill Sheets read gets a hard time
+        # budget sized to whatever's left of Discord's 3s window — on a cold
+        # start (most of the budget already gone) the modal opens immediately
+        # without prefill rather than overrunning the deadline.
         last_week = None
-        try:
-            import sheets
-
-            future = _prefill_pool.submit(sheets.get_user_prefill, user["id"])
-            _, last_week = future.result(timeout=PREFILL_TIMEOUT_S)
-        except Exception as e:
-            log.warning("Prefill skipped: %s", e)
+        budget = _interaction_budget()
+        if budget >= MIN_PREFILL_BUDGET_S:
+            try:
+                future = _prefill_pool.submit(_prefill_last_week, user["id"])
+                _, last_week = future.result(timeout=budget)
+            except Exception as e:
+                log.warning("Prefill skipped: %s", e)
+        else:
+            log.warning(
+                "Prefill skipped: only %.2fs of interaction budget left", budget
+            )
         return jsonify(_checkin_modal(last_week))
 
     if name == "summary":
@@ -689,11 +754,13 @@ def _handle_autocomplete(interaction: dict):
             typed = str(opt.get("value", "")).strip().lower()
 
     choices: list[dict] = []
+    budget = _interaction_budget()
+    if budget < MIN_PREFILL_BUDGET_S:
+        log.warning("Autocomplete skipped: only %.2fs of interaction budget left", budget)
+        return jsonify({"type": AUTOCOMPLETE_RESULT, "data": {"choices": choices}})
     try:
-        import sheets
-
-        future = _prefill_pool.submit(sheets.get_photo_log, user["id"])
-        photos = future.result(timeout=PREFILL_TIMEOUT_S)
+        future = _prefill_pool.submit(_photo_log_worker, user["id"])
+        photos = future.result(timeout=budget)
         # Newest first: replacing a recent photo is the common case.
         for p in reversed(photos):
             # Match a leading "2026-0..." the obvious way, but also let a bare
