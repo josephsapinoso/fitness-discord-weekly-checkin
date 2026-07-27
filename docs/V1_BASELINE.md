@@ -156,24 +156,19 @@ a broken working tree.
 ### Path A — shift traffic to the v1 revision (fast, reversible)
 
 Cloud Run keeps old revisions, and every deploy stamps its revision with the commit it was
-built from — so find the one built from the v1 tag rather than trusting a number written
-here:
+built from. `scripts/rollback_to.sh` finds the revision built from a tag and shifts traffic
+to it — **dry run by default**, so it is safe to run just to see what it would do:
 
 ```bash
-V1_SHA=$(git rev-parse v1.0.0)
-gcloud run revisions list --service=fitness-checkin-bot --region=us-west1 \
-  --format="value(metadata.name)" \
-  --filter="metadata.labels.commit=$V1_SHA"
+./scripts/rollback_to.sh v1.0.0             # show the revision and stop
+./scripts/rollback_to.sh v1.0.0 --execute   # actually shift traffic
 ```
 
-Then send all traffic to it:
-
-```bash
-gcloud run services update-traffic fitness-checkin-bot \
-  --region=us-west1 --to-revisions=<that-revision>=100
-```
-
-If that returns nothing, the revision has been garbage-collected — use Path B.
+Use the script rather than composing the `gcloud` call by hand. Resolving the tag needs
+`git rev-parse 'v1.0.0^{commit}'` — a bare `git rev-parse v1.0.0` returns the *annotated
+tag object's* sha, which never matches a revision label and silently finds nothing. The
+script also tells you when the revision has been garbage-collected, which is the signal to
+use Path B.
 
 Confirm, then check health:
 

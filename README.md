@@ -124,7 +124,10 @@ Endpoint URL — usually it's easier to just deploy.
 ├── env.yaml.example       # Template for Cloud Run env vars (copy to env.yaml)
 ├── .env.example           # Template for local development env vars
 ├── docs/GCP_DEPLOY.md     # Full deployment guide
-└── docs/V1_BASELINE.md    # Frozen v1 surface + rollback runbook
+├── docs/V1_BASELINE.md    # Frozen v1 surface + rollback runbook
+├── scripts/redeploy.sh    # Deploy main (refuses a dirty or non-main tree)
+├── scripts/check_deployed.sh  # Is production running origin/main?
+└── scripts/rollback_to.sh     # Shift traffic back to a tagged release
 ```
 
 ## Customization
