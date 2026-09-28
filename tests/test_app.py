@@ -327,6 +327,8 @@ check("checkin embed → right channel", cid == "999888777")
 check("checkin embed title uses nick", embed["title"] == "Weekly Check-in — Joey")
 weight_field = embed["fields"][0]
 check("weight change computed", "📉 -1.2" in weight_field["value"], weight_field["value"])
+total_field = next(f for f in embed["fields"] if f["name"] == "📊 Total Change")
+check("total change computed", total_field["value"] == "📉 -15.0 lbs", total_field["value"])
 check("checkin ephemeral confirmed", calls["edit"][0][1]["content"].startswith("✅"))
 
 # First-ever check-in: nothing in the sheet to recover, so today's weight IS the
@@ -344,6 +346,8 @@ for label, stub, expected in [
     resp = client.post("/process", json=submit_body, headers={"X-Task-Secret": "s3cret"})
     check(f"{label} → 200", resp.status_code == 200)
     check(f"{label} → starting falls back to current", logged[0]["starting_weight"] == expected)
+    total_field = next(f for f in calls["post"][-1][1]["embeds"][0]["fields"] if f["name"] == "📊 Total Change")
+    check(f"{label} → total change is zero", total_field["value"] == "➡️ +0.0 lbs", total_field["value"])
 sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs")
 
 # summary task

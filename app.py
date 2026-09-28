@@ -181,6 +181,7 @@ def _build_checkin_embed(
     can_work_on: str,
 ) -> dict:
     week_str = datetime.now(timezone.utc).strftime("Week of %B %d, %Y")
+    total = _change_suffix(current, starting).strip()
     return {
         "title": f"Weekly Check-in — {discord_api.display_name(user, member)}",
         "description": week_str,
@@ -190,6 +191,7 @@ def _build_checkin_embed(
             {"name": "⚖️ Current Weight", "value": f"{current}{_change_suffix(current, last_week)}", "inline": True},
             {"name": "📅 Last Week", "value": last_week, "inline": True},
             {"name": "🚀 Starting Weight", "value": starting, "inline": True},
+            {"name": "📊 Total Change", "value": f"{total} lbs" if total else "—", "inline": False},
             {"name": "🌟 Proud of", "value": proud_of, "inline": False},
             {"name": "🎯 Can Work On", "value": can_work_on, "inline": False},
         ],
