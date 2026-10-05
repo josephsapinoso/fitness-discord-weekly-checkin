@@ -15,6 +15,7 @@ Credentials are resolved in this order:
 import os
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 
 import gspread
@@ -127,63 +128,64 @@ def _ensure_headers(ws: gspread.Worksheet, headers: list[str]) -> None:
     ws.insert_row(headers, 1)
 
 
+# One client and one Worksheet handle per tab, built once per process. Opening a
+# tab from scratch is four serial Google round trips (auth, spreadsheet
+# metadata, tab lookup, header check) — ~0.7s of the ~0.85s a /checkin prefill
+# read took, against a budget of at most 1.4s, so a warm instance still timed
+# out and opened the modal with Last Week's Weight blank. Reusing the handle
+# leaves only the read itself (~0.2s). google-auth refreshes the token in place.
+_client: gspread.Client | None = None
+_tabs: dict[str, gspread.Worksheet] = {}
+_tabs_lock = threading.Lock()
+
+
+def _open_tab(sheet_name: str, headers: list[str]) -> gspread.Worksheet:
+    """Open (or create) a worksheet, reusing the process-wide handle."""
+    global _client
+    ws = _tabs.get(sheet_name)
+    if ws is not None:
+        return ws
+    with _tabs_lock:
+        ws = _tabs.get(sheet_name)
+        if ws is not None:
+            return ws
+        if _client is None:
+            _client = _get_client()
+        spreadsheet = _client.open_by_key(os.environ["GOOGLE_SHEET_ID"])
+
+        try:
+            ws = spreadsheet.worksheet(sheet_name)
+        except gspread.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(
+                title=sheet_name, rows=1000, cols=len(headers)
+            )
+            ws.append_row(headers)
+
+        _ensure_headers(ws, headers)
+        _tabs[sheet_name] = ws
+        return ws
+
+
 def _get_sheet() -> gspread.Worksheet:
     """Open (or create) the worksheet."""
-    client = _get_client()
-    spreadsheet_id = os.environ["GOOGLE_SHEET_ID"]
-    sheet_name = os.environ.get("GOOGLE_SHEET_TAB", "Check-ins")
-
-    spreadsheet = client.open_by_key(spreadsheet_id)
-
-    try:
-        ws = spreadsheet.worksheet(sheet_name)
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=len(HEADERS))
-        ws.append_row(HEADERS)
-
-    _ensure_headers(ws, HEADERS)
-    return ws
+    return _open_tab(os.environ.get("GOOGLE_SHEET_TAB", "Check-ins"), HEADERS)
 
 
 def _get_photos_sheet() -> gspread.Worksheet:
     """Open (or create) the per-user Photos worksheet."""
-    client = _get_client()
-    spreadsheet_id = os.environ["GOOGLE_SHEET_ID"]
-    sheet_name = os.environ.get("GOOGLE_PHOTOS_TAB", "Photos")
-
-    spreadsheet = client.open_by_key(spreadsheet_id)
-
-    try:
-        ws = spreadsheet.worksheet(sheet_name)
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(
-            title=sheet_name, rows=1000, cols=len(PHOTO_HEADERS)
-        )
-        ws.append_row(PHOTO_HEADERS)
-
-    _ensure_headers(ws, PHOTO_HEADERS)
-    return ws
+    return _open_tab(os.environ.get("GOOGLE_PHOTOS_TAB", "Photos"), PHOTO_HEADERS)
 
 
 def _get_photo_log_sheet() -> gspread.Worksheet:
     """Open (or create) the append-only Photo Log worksheet."""
-    client = _get_client()
-    spreadsheet_id = os.environ["GOOGLE_SHEET_ID"]
-    sheet_name = os.environ.get("GOOGLE_PHOTO_LOG_TAB", "Photo Log")
+    return _open_tab(
+        os.environ.get("GOOGLE_PHOTO_LOG_TAB", "Photo Log"), PHOTO_LOG_HEADERS
+    )
 
-    spreadsheet = client.open_by_key(spreadsheet_id)
 
-    try:
-        ws = spreadsheet.worksheet(sheet_name)
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(
-            title=sheet_name, rows=1000, cols=len(PHOTO_LOG_HEADERS)
-        )
-        ws.append_row(PHOTO_LOG_HEADERS)
-
-    _ensure_headers(ws, PHOTO_LOG_HEADERS)
-
-    return ws
+def warmup() -> None:
+    """Open the Check-ins tab off the interaction deadline (keep-warm ping)."""
+    _get_sheet()
 
 
 def append_photo_log(

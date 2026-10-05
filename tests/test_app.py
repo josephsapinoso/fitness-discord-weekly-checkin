@@ -58,6 +58,10 @@ import discord_api  # noqa: E402
 import sheets  # noqa: E402
 import tasks_queue  # noqa: E402
 
+# The health route's warm-up opens the real sheet; keep the suite offline.
+REAL_SHEETS_WARMUP = sheets.warmup
+sheets.warmup = lambda: None
+
 client = app_module.app.test_client()
 
 PASS = 0
@@ -1221,5 +1225,47 @@ check("howto lists the new commands", "/collage" in _fields and "/photo-replace"
 _reminder = app_module._reminder_embed()["description"]
 check("reminder drops starting weight", "Starting weight" not in _reminder)
 check("reminder mentions optional photo", "progress photo" in _reminder.lower())
+
+
+# ── Sheets handles are opened once per process ─────────────────────────────────
+# Re-opening a tab on every call cost ~0.7s of auth + metadata round trips, so a
+# warm /checkin's prefill read (budget ≤1.4s) still timed out and opened the
+# modal with Last Week's Weight blank.
+class _CountingSpreadsheet:
+    def __init__(self, opened):
+        self.opened = opened
+
+    def worksheet(self, name):
+        self.opened.append(name)
+        return _FakeWS(sheets.HEADERS)
+
+
+class _CountingClient:
+    def __init__(self):
+        self.opened = []
+
+    def open_by_key(self, key):
+        return _CountingSpreadsheet(self.opened)
+
+
+_TAB = os.environ.get("GOOGLE_SHEET_TAB", "Check-ins")
+_auths = []
+_cc = _CountingClient()
+_orig_sheets_client = sheets._get_client
+sheets._get_client = lambda: _auths.append(1) or _cc
+sheets._client = None
+sheets._tabs.clear()
+_ws1 = sheets._get_sheet()
+_ws2 = sheets._get_sheet()
+sheets._get_photos_sheet()
+check("check-ins tab opened once and reused", _ws1 is _ws2 and _cc.opened.count(_TAB) == 1)
+check("one Sheets client for every tab", len(_auths) == 1 and len(_cc.opened) == 2)
+
+sheets._tabs.clear()
+REAL_SHEETS_WARMUP()
+check("warmup() opens the check-ins tab", _TAB in sheets._tabs)
+sheets._get_client = _orig_sheets_client
+sheets._client = None
+sheets._tabs.clear()
 
 print(f"\nAll {PASS} checks passed ✅")

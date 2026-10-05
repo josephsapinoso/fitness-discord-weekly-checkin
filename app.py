@@ -588,10 +588,11 @@ def health():
     if not _warmed:
         _warmed = True
         try:
-            import sheets  # noqa: F401  (gspread + google-auth import)
+            import sheets
             import tasks_queue
 
             tasks_queue.warmup()
+            sheets.warmup()
         except Exception as e:
             log.warning("Warm-up skipped: %s", e)
     return "ok", 200
