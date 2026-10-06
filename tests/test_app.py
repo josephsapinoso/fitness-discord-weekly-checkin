@@ -50,6 +50,9 @@ os.environ.update(
         # which fills in missing keys — so a developer's real .env would otherwise
         # decide whether this suite passes. CI has no .env; locally there is one.
         "ARCHIVE_CHANNEL_ID": "",
+        # Same reasoning: empty means "no admin alerts", and it must be present so
+        # a developer's real .env can't switch them on under the suite.
+        "ADMIN_USER_ID": "",
     }
 )
 
@@ -431,6 +434,106 @@ resp = client.post(
 )
 check("task error → 200 (no retry)", resp.status_code == 200)
 check("task error → user warned", "⚠️" in calls["edit"][0][1]["content"])
+
+# ── 6b. Admin alerts: background failures reach a human ───────────────────────
+# /process swallows errors by design (200, so Cloud Tasks never retries and
+# double-writes), which is why every v1 outage sat in the logs for hours. With
+# ADMIN_USER_ID set the same failure also lands in the admin's DMs.
+dms_admin: list = []
+_real_send_dm = discord_api.send_dm
+_stub_send_dm = (
+    lambda uid, payload, file_buf=None, filename="progress.png": dms_admin.append((str(uid), payload))
+)
+discord_api.send_dm = _stub_send_dm
+os.environ["ADMIN_USER_ID"] = "777"
+PROGRESS_TASK = {"kind": "progress", "view": "all", "token": "t", "user": USER, "member_nick": None}
+
+calls["edit"].clear(); dms_admin.clear()
+resp = client.post("/process", json=PROGRESS_TASK, headers={"X-Task-Secret": "s3cret"})
+check("admin alert → still 200", resp.status_code == 200)
+check("admin alert → user still warned", "⚠️" in calls["edit"][0][1]["content"])
+check("admin alert → one DM to the admin", len(dms_admin) == 1 and dms_admin[0][0] == "777")
+_text = dms_admin[0][1]["content"]
+check(
+    "admin alert names the task, user and error",
+    "progress" in _text and "42" in _text and "RuntimeError" in _text and "sheets down" in _text,
+)
+check("admin alert carries a traceback", "```" in _text and "boom" in _text)
+check("admin alert fits Discord's limit", len(_text) <= 2000)
+
+
+# A huge exception message must neither exceed 2000 chars nor eat the fence.
+def boom_long(uid):
+    raise RuntimeError("x" * 5000)
+
+
+sheets.get_user_history = boom_long
+dms_admin.clear()
+client.post("/process", json=PROGRESS_TASK, headers={"X-Task-Secret": "s3cret"})
+_text = dms_admin[0][1]["content"]
+check("oversized error → DM capped at 2000", len(_text) <= 2000)
+check("oversized error → fence still closed", _text.endswith("```"))
+
+
+# The alert failing must never break the always-200 rule or the user's reply.
+def dm_fails(uid, payload, file_buf=None, filename="progress.png"):
+    raise RuntimeError("Cannot send messages to this user")
+
+
+discord_api.send_dm = dm_fails
+sheets.get_user_history = boom
+calls["edit"].clear()
+resp = client.post("/process", json=PROGRESS_TASK, headers={"X-Task-Secret": "s3cret"})
+check("admin DM failure → still 200", resp.status_code == 200)
+check("admin DM failure → user still warned", "⚠️" in calls["edit"][0][1]["content"])
+discord_api.send_dm = _stub_send_dm
+
+# An unknown kind is a deploy/registration mismatch — worth a DM too.
+dms_admin.clear()
+client.post("/process", json={"kind": "no-such-kind", "token": "t", "user": USER},
+            headers={"X-Task-Secret": "s3cret"})
+check("unknown kind → admin DM names it", len(dms_admin) == 1 and "no-such-kind" in dms_admin[0][1]["content"])
+
+# The admin_alert task kind is how the ack path reports (it can't DM inline).
+dms_admin.clear()
+client.post("/process", json={"kind": "admin_alert", "text": "hi"}, headers={"X-Task-Secret": "s3cret"})
+check("admin_alert task → DM sent", dms_admin == [("777", {"content": "hi"})])
+
+# Unset (the default, and CI) → nothing is sent.
+os.environ["ADMIN_USER_ID"] = ""
+dms_admin.clear()
+client.post("/process", json=PROGRESS_TASK, headers={"X-Task-Secret": "s3cret"})
+check("no ADMIN_USER_ID → no DM", dms_admin == [])
+
+# A skipped /checkin prefill is the silent precursor to "did not respond". It is
+# reported through a Cloud Task from a worker thread — never inline on the 3s
+# path — and at most once per cooldown so a cold-start burst is one DM.
+os.environ["ADMIN_USER_ID"] = "777"
+app_module._prefill_skips = 0
+app_module._last_prefill_alert_ts = 0.0
+enqueued.clear()
+resp = stale_signed_post(cmd_interaction("checkin"), age_s=5)
+check("prefill skipped → modal still opens", resp.get_json()["type"] == 9)
+for _ in range(200):
+    if any(p["kind"] == "admin_alert" for p, _ in enqueued):
+        break
+    time.sleep(0.02)
+_alerts = [p for p, _ in enqueued if p["kind"] == "admin_alert"]
+check(
+    "prefill skipped → admin alert enqueued from a worker",
+    len(_alerts) == 1 and "prefill skipped" in _alerts[0]["text"] and "1 time(s)" in _alerts[0]["text"],
+)
+check("prefill alert task goes to this service", enqueued[-1][1] == "https://example.run.app")
+stale_signed_post(cmd_interaction("checkin"), age_s=5)
+time.sleep(0.1)
+check(
+    "prefill skipped again → inside cooldown, still one alert",
+    sum(1 for p, _ in enqueued if p["kind"] == "admin_alert") == 1,
+)
+check("skips inside the cooldown are still counted", app_module._prefill_skips == 1)
+os.environ["ADMIN_USER_ID"] = ""
+discord_api.send_dm = _real_send_dm
+enqueued.clear()
 
 # ── 7. /reminder ───────────────────────────────────────────────────────────────
 resp = client.post("/reminder", headers={"X-Reminder-Secret": "nope"})

@@ -80,6 +80,26 @@ gcloud run services logs read fitness-checkin-bot --region us-west1 --limit 100 
 gcloud tasks queues describe discord-followups --location us-west1
 ```
 
+### Admin alerts
+
+`/process` deliberately returns 200 on failure (so Cloud Tasks never retries and
+double-writes a check-in), which means a broken task is invisible unless someone is
+reading the logs — and a user whose interaction token has died can't be told either. With
+`ADMIN_USER_ID` set, the bot also DMs that user:
+
+- **A task failed** — the task kind, the user it ran for, the exception, and the last three
+  stack frames (trimmed to Discord's 2000-character limit).
+- **An unknown task kind arrived** — almost always a handler/registration mismatch after a
+  partial deploy or rollback.
+- **A `/checkin` prefill was skipped** — the modal opened without last week's weight because
+  the 3-second budget was nearly gone (usually a cold start). This is the early warning for
+  "The application did not respond", so it is reported **at most once an hour**, with a count
+  of how many skips that hour contained. The alert is enqueued from a worker thread; nothing
+  is added to the interaction path.
+
+The alert path never raises: if the DM itself fails, the only trace is an
+`Admin alert failed:` warning. The admin must share a server with the bot for DMs to open.
+
 ---
 
 ## Changing the Reminder Schedule

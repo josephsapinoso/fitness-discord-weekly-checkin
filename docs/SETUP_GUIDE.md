@@ -225,6 +225,7 @@ one-time infrastructure and use [REDEPLOY_CHECKLIST.md](REDEPLOY_CHECKLIST.md) o
 | `GOOGLE_CREDENTIALS_FILE` | no | Path to a credentials JSON file instead of the env var (default `credentials.json`) | `credentials.json` |
 | `TASK_SECRET` | yes | Shared secret guarding `/process` and `/reminder` | `openssl rand -hex 32` output |
 | `MAX_IMAGE_BYTES` | no | Max inbound photo size before decoding (default 10 MiB) | `10485760` |
+| `ADMIN_USER_ID` | no | Discord user DMed when a background task fails or a `/checkin` prefill is skipped; blank disables | `210238326135848961` |
 | `TASKS_LOCATION` | no | Cloud Tasks queue region (default `us-west1`) | `us-west1` |
 | `TASKS_QUEUE` | no | Cloud Tasks queue name (default `discord-followups`) | `discord-followups` |
 | `GOOGLE_CLOUD_PROJECT` | no | GCP project; auto-detected on Cloud Run | `fitness-checkin-bot` |
