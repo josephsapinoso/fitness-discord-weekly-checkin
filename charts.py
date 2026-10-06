@@ -48,10 +48,15 @@ def compute_stats(history: list[dict], period: list[dict]) -> dict:
     Pace uses a least-squares trend over the period rather than just
     endpoints, so one bad weigh-in doesn't distort it.
     """
+    # The recorded Starting Weight wins over the first logged weigh-in: a
+    # member who began before the bot existed carries their real start in that
+    # column, and the check-in embed's Total Change already uses it. Without
+    # this, /progress and the check-in disagreed about the same journey.
+    starting = history[0].get("starting") or history[0]["weight"]
     stats = {
-        "starting": history[0]["weight"],
+        "starting": starting,
         "current": history[-1]["weight"],
-        "total_change": history[-1]["weight"] - history[0]["weight"],
+        "total_change": history[-1]["weight"] - starting,
         "checkins": len(history),
         "period_change": None,
         "pace_per_week": None,

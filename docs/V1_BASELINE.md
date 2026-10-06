@@ -66,6 +66,9 @@ top, one line per change, so a rollback's blast radius is readable at a glance:
 - **Monday recap** (`recap.py`, `/recap`, task kind `weekly_recap`). `/reminder` now only
   enqueues; the task builds the prompt + last-week recap from one Check-ins read and falls
   back to the plain prompt on failure. 10 commands. Same Scheduler job; no schema change.
+- **`/progress` uses the recorded Starting Weight.** `get_user_history` rows carry
+  `starting`; `compute_stats` prefers it over the first logged weigh-in, so Overall and the
+  goal percentage agree with the check-in embed's Total Change.
 
 ---
 

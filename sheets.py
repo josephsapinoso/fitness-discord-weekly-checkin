@@ -432,8 +432,10 @@ def parse_weight(value) -> float | None:
 def get_user_history(user_id: int) -> list[dict]:
     """Return all of a user's check-ins, oldest first.
 
-    Each item: {"date": datetime (UTC), "weight": float}.
-    Rows with unparseable timestamps or weights are skipped.
+    Each item: {"date": datetime (UTC), "weight": float, "starting": float | None}.
+    `starting` is the row's recorded Starting Weight — which can predate the first
+    logged weigh-in (v1 asked for it explicitly), so stats must prefer it over
+    the first row's weight. Rows with unparseable timestamps or weights are skipped.
     """
     ws = _get_sheet()
     records = ws.get_all_records()
@@ -450,7 +452,10 @@ def get_user_history(user_id: int) -> list[dict]:
         weight = parse_weight(r.get("Current Weight"))
         if weight is None:
             continue
-        history.append({"date": dt, "weight": weight})
+        history.append({
+            "date": dt, "weight": weight,
+            "starting": parse_weight(r.get("Starting Weight")),
+        })
     history.sort(key=lambda h: h["date"])
     return history
 

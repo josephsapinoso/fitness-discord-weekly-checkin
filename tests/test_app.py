@@ -573,6 +573,24 @@ fields, buf = _progress_with_goal(_raise_sheets)
 check("goal lookup failing → chart still returned", "🎯 Goal" not in fields and buf is not None)
 sheets.get_goal = lambda uid: None
 
+# A recorded Starting Weight that predates the first logged weigh-in (v1 asked
+# for it explicitly) must drive Starting / Overall / goal %, as it already does
+# on the check-in embed. Found live: 191 logged first, 201 recorded, so
+# /progress said −2.0 and 8% while the check-in said −12.0.
+_recorded = [{**h, "starting": 210.0} for h in fake_history]
+sheets.get_user_history = lambda uid: _recorded
+fields, _ = _progress_with_goal(lambda uid: 180.0)
+check("progress uses the recorded starting weight", fields["🚀 Starting"] == "210.0 lbs", fields["🚀 Starting"])
+check("overall change measured from the recorded start", fields["Overall"] == "📉 -23.2 lbs", fields["Overall"])
+check("goal percent measured from the recorded start",
+      fields["🎯 Goal"] == "180.0 lbs — 6.8 to go (77% there)", fields["🎯 Goal"])
+_blank_start = [{**h, "starting": None} for h in fake_history]
+sheets.get_user_history = lambda uid: _blank_start
+fields, _ = _progress_with_goal(lambda uid: None)
+check("blank starting column → first weigh-in, as before", fields["🚀 Starting"] == "200.0 lbs")
+sheets.get_user_history = lambda uid: fake_history
+sheets.get_goal = lambda uid: None
+
 # progress: 30d view via button — only recent points
 calls["edit"].clear()
 client.post(
