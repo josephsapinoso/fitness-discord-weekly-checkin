@@ -42,6 +42,15 @@ not fork-safe). 10 pinned dependencies, listed in `requirements.txt`.
 **Cost:** $0/month. Scales to zero; 2 Cloud Scheduler jobs against a free tier of 3;
 keep-warm burns roughly 2.4% of the free 180,000 vCPU-seconds.
 
+### Since v1
+
+The tables below describe v1 exactly and are left as they were. What `main` has added on
+top, one line per change, so a rollback's blast radius is readable at a glance:
+
+- **Admin alerts** (`ADMIN_USER_ID`, optional). A failed or unknown `/process` task, or a
+  skipped `/checkin` prefill, DMs the admin. New task kind `admin_alert`. No schema change;
+  v1 ignores the env var.
+
 ---
 
 ## The 3-second rule

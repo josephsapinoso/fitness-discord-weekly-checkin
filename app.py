@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import time
+import traceback
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -66,6 +67,14 @@ EPHEMERAL = 64
 # Discord gives us only 3 seconds to open a modal, and modals can't be deferred)
 _prefill_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 PREFILL_TIMEOUT_S = float(os.environ.get("PREFILL_TIMEOUT_S", "1.4"))
+
+# A skipped prefill is the silent precursor to "The application did not
+# respond": it means the 3s budget was nearly gone before the handler ran. It
+# only ever showed in logs nobody was reading, so the admin is told — at most
+# once an hour, with a count, so a cold-start burst is one DM rather than ten.
+PREFILL_ALERT_COOLDOWN_S = 3600.0
+_prefill_skips = 0
+_last_prefill_alert_ts = 0.0
 
 # Discord's hard interaction deadline. A modal (and an autocomplete result)
 # can't be deferred, so the response has to reach Discord within this window.
@@ -130,6 +139,75 @@ def _photo_log_worker(user_id: str):
 def _self_url() -> str:
     """Base URL of this service (for Cloud Tasks callbacks)."""
     return os.environ.get("SELF_URL") or request.host_url
+
+
+def _admin_user_id() -> str | None:
+    """Discord user to DM about background failures, if configured."""
+    return (os.environ.get("ADMIN_USER_ID") or "").strip() or None
+
+
+def _admin_alert(text: str) -> None:
+    """DM the admin. Never raises: callers sit inside /process's always-200 path."""
+    admin = _admin_user_id()
+    if not admin:
+        return
+    try:
+        discord_api.send_dm(admin, {"content": text[:2000]})
+    except Exception as e:
+        log.warning("Admin alert failed: %s", e)
+
+
+def _format_task_failure(kind: str, payload: dict, exc: BaseException) -> str:
+    """A DM-sized report: which task, for whom, what broke, and where."""
+    user = payload.get("user") or {}
+    who = payload.get("username") or user.get("username") or "?"
+    header = (
+        f"⚠️ Task `{kind}` failed\n"
+        f"user: {user.get('id', '?')} ({who})\n"
+        f"{type(exc).__name__}: {exc}\n"
+    )[:1500]
+    frames = "".join(
+        traceback.format_list(traceback.extract_tb(exc.__traceback__)[-3:])
+    ).strip()
+    if not frames:
+        return header
+    room = 2000 - len(header) - 8  # the fences: '```\n' and '\n```'
+    return f"{header}```\n{frames[:room]}\n```"
+
+
+def _enqueue_quietly(payload: dict, self_url: str) -> None:
+    """tasks_queue.enqueue for a worker thread: log on failure, never raise."""
+    import tasks_queue
+
+    try:
+        tasks_queue.enqueue(payload, self_url)
+    except Exception as e:
+        log.warning("Admin alert enqueue failed: %s", e)
+
+
+def _note_prefill_skip(reason: str) -> None:
+    """Report a skipped /checkin prefill without touching the ack path.
+
+    Enqueueing costs ~0.7s warm and ~2.5s cold — the very budget that was
+    just found to be gone — so the alert is handed to a worker thread.
+    `_self_url()` reads the request, so it is resolved here, before the hop.
+    """
+    global _prefill_skips, _last_prefill_alert_ts
+    _prefill_skips += 1
+    if not _admin_user_id():
+        return
+    now = time.time()
+    if now - _last_prefill_alert_ts < PREFILL_ALERT_COOLDOWN_S:
+        return
+    _last_prefill_alert_ts = now
+    text = (
+        f"⚠️ /checkin prefill skipped ({_prefill_skips} time(s) since last alert): "
+        f"{reason}"
+    )
+    _prefill_skips = 0
+    _prefill_pool.submit(
+        _enqueue_quietly, {"kind": "admin_alert", "text": text}, _self_url()
+    )
 
 
 def _interaction_user(interaction: dict) -> tuple[dict, dict | None]:
@@ -643,10 +721,12 @@ def _handle_command(interaction: dict):
                 _, last_week = future.result(timeout=budget)
             except Exception as e:
                 log.warning("Prefill skipped: %s", e)
+                _note_prefill_skip(f"{type(e).__name__}: {e}")
         else:
             log.warning(
                 "Prefill skipped: only %.2fs of interaction budget left", budget
             )
+            _note_prefill_skip(f"only {budget:.2f}s of interaction budget left")
         return jsonify(_checkin_modal(last_week))
 
     if name == "summary":
@@ -930,18 +1010,24 @@ def process_task():
             _task_collage(payload)
         elif kind == "photo_replace":
             _task_photo_replace(payload)
+        elif kind == "admin_alert":
+            _admin_alert(payload.get("text", ""))
         else:
             # The interaction is already deferred, so returning without a reply
             # leaves the user on "thinking…" forever. Always answer something.
             log.error("Unknown task kind: %s", kind)
             _reply(token, payload.get("user"),
                    {"content": "⚠️ Something went wrong. Please try again."})
+            _admin_alert(f"⚠️ Unknown task kind `{kind}` — a handler/registration mismatch?")
     except Exception as e:
         # Return 200 so Cloud Tasks does NOT retry — retries could double-write
-        # check-ins to the sheet. Surface the error to the user instead.
+        # check-ins to the sheet. Surface the error to the user instead — and to
+        # the admin, because the user's reply may itself be lost to a dead token
+        # and the log line has historically gone unread for hours.
         log.exception("Task %s failed: %s", kind, e)
         _reply(token, payload.get("user"),
                {"content": "⚠️ Something went wrong. Please try again."})
+        _admin_alert(_format_task_failure(kind, payload, e))
     return "ok", 200
 
 
