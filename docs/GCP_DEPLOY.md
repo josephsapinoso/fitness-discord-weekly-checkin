@@ -135,13 +135,14 @@ free 180,000 vCPU-seconds.
 ## 7. Weekly reminder via Cloud Scheduler
 
 The reminder used to be a loop inside the bot process; now Cloud Scheduler calls
-`/reminder` on a cron schedule. The old schedule was **Monday 09:00 UTC**:
+`/reminder` on a cron schedule. The schedule is **Monday 08:00 America/Los_Angeles**
+(it was 09:00 UTC until 2026-10-06, which is 1–2 AM Pacific — nobody's check-in hour):
 
 ```bash
 gcloud scheduler jobs create http weekly-checkin-reminder \
   --location=us-west1 \
-  --schedule="0 9 * * 1" \
-  --time-zone="Etc/UTC" \
+  --schedule="0 8 * * 1" \
+  --time-zone="America/Los_Angeles" \
   --uri="https://YOUR-SERVICE-URL/reminder" \
   --http-method=POST \
   --headers="X-Reminder-Secret=YOUR_TASK_SECRET_VALUE"
@@ -152,7 +153,7 @@ To change the day/time, edit `--schedule` (standard cron) and `--time-zone`
 
 ```bash
 gcloud scheduler jobs update http weekly-checkin-reminder \
-  --location=us-west1 --schedule="0 9 * * 1" --time-zone="Etc/UTC"
+  --location=us-west1 --schedule="0 8 * * 1" --time-zone="America/Los_Angeles"
 ```
 
 Fire it once right now to test:

@@ -36,7 +36,7 @@ This document explains every platform, service, and library used in this project
      │ POST /process (X-Task-Secret)
      └─────────────▶ back to Cloud Run
 
-Cloud Scheduler ──(cron: Mon 09:00 UTC)──▶ POST /reminder
+Cloud Scheduler ──(cron: Mon 08:00 PT)───▶ POST /reminder
 ```
 
 The defining constraint is Discord's **3-second acknowledgement deadline**. Anything slower
@@ -122,7 +122,7 @@ by a second request to `/process`, which then edits the original response.
 **Role in this project:** Posts the weekly check-in prompt. In the old gateway bot this was a `@tasks.loop` inside the resident process; with no resident process, it became an external cron job hitting `POST /reminder`.
 
 **Key concepts used:**
-- **Cron schedule + time zone:** `--schedule="0 9 * * 1" --time-zone="Etc/UTC"`. Setting a real IANA zone makes the reminder follow daylight saving automatically.
+- **Cron schedule + time zone:** `--schedule="0 8 * * 1" --time-zone="America/Los_Angeles"`. Setting a real IANA zone makes the reminder follow daylight saving automatically.
 - **Custom headers:** Carries `X-Reminder-Secret`, checked against `TASK_SECRET`.
 - **Manual runs:** `gcloud scheduler jobs run` fires it immediately for testing.
 - **Free tier:** 3 jobs; this uses 1.
