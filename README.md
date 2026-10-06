@@ -22,7 +22,7 @@ free tier ($0/month)** as a Discord HTTP interactions endpoint — no always-on 
 - `/photo-replace` — swap the photo stored for a given date (with autocomplete)
 - `/howto` — a pinnable explainer for how the weekly check-in works
 - **Streaks** — consecutive weeks checked in (Monday–Sunday, Pacific) show on every check-in and on `/progress`; 4, 8, 12, 26 and 52 weeks get a 🏅 post
-- **Weekly reminder** — Cloud Scheduler posts a prompt every Monday at 8 AM Pacific (configurable, no redeploy needed)
+- **Monday recap** — every Monday at 8 AM Pacific (Cloud Scheduler; configurable, no redeploy needed) the bot posts the check-in prompt plus last week: who checked in, streaks, each member's change, the group's combined total and the biggest mover. `/recap` posts it on demand
 
 ### Progress photos & before/after
 

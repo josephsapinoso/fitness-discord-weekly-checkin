@@ -63,6 +63,9 @@ top, one line per change, so a rollback's blast radius is readable at a glance:
   per user, id written RAW). `/progress` gains 🎯 Goal / 📅 Projected fields and a gold goal
   line; check-ins gain a 🏁 Goal line. 9 commands. A v1 rollback ignores the tab, and
   re-registering v1's list drops `/goal`.
+- **Monday recap** (`recap.py`, `/recap`, task kind `weekly_recap`). `/reminder` now only
+  enqueues; the task builds the prompt + last-week recap from one Check-ins read and falls
+  back to the plain prompt on failure. 10 commands. Same Scheduler job; no schema change.
 
 ---
 

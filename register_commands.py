@@ -110,6 +110,7 @@ COMMANDS = [
             {"type": 1, "name": "clear", "description": "Remove your goal weight"},
         ],
     },
+    {"name": "recap", "description": "Post last week's group recap now"},
 ]
 
 

@@ -65,7 +65,8 @@ Log lines look like:
 
 ```
 2026-07-24 09:00:00 INFO Enqueued task kind=checkin_submit
-2026-07-24 09:00:02 INFO Weekly reminder posted.
+2026-07-24 09:00:02 INFO Weekly recap enqueued.
+2026-07-24 09:00:04 INFO Weekly recap posted.
 2026-07-24 09:00:05 WARNING Prefill skipped: TimeoutError
 ```
 
@@ -133,6 +134,16 @@ gcloud scheduler jobs run weekly-checkin-reminder --location=us-west1
 ```
 
 To change the reminder's wording, edit `_reminder_embed()` in `app.py` and redeploy.
+
+### What the Monday post contains
+
+`/reminder` only **enqueues** a `weekly_recap` task and returns, so a slow Sheets read can
+never make Scheduler time out and retry (which would post twice). The task reads the
+Check-ins tab once and posts the prompt plus a **📋 Last week** section — ✅/— per member,
+streak, change vs the week before — a **👥 Group** combined total, and a **🏆 Biggest
+mover** (largest % loss, only if someone lost). If the recap can't be built, the plain
+prompt posts anyway and the admin is DMed (see Admin alerts). `/recap` posts the same embed
+on demand, which is the easy way to test it without waiting for Monday.
 
 ---
 
@@ -321,7 +332,7 @@ failure can never lose the written check-in. Check, in order:
 
 ### `/day1` doesn't appear in Discord
 
-Re-run `python register_commands.py` and confirm it prints **9** commands. This is the
+Re-run `python register_commands.py` and confirm it prints **10** commands. This is the
 easiest step to forget after deploying the photo feature. Global commands can take up to
 an hour to propagate.
 
@@ -466,8 +477,6 @@ To change someone's goal by hand, edit the `Goal Weight` cell; the user id colum
 - `/leaderboard` — rank members by total weight lost since starting weight
 
 **Automated summaries:**
-- Post a weekly group summary automatically — a second Cloud Scheduler job hitting a new
-  endpoint is the natural shape, since the reminder job already proves the pattern
 - Render a group chart with matplotlib the way `/progress` does for individuals
 
 **Photo features:**

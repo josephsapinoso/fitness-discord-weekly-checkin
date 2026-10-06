@@ -508,3 +508,33 @@ def clear_goal(user_id: int) -> bool:
         datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     )
     return had
+
+
+def get_all_checkins() -> list[dict]:
+    """Every parseable check-in for every member, oldest first.
+
+    One read serves the whole weekly recap. Rows: {"user_id", "username",
+    "date" (UTC datetime), "weight", "starting" (float | None)}; rows with an
+    unparseable timestamp or weight are skipped, as in get_user_history.
+    """
+    ws = _get_sheet()
+    rows: list[dict] = []
+    for r in ws.get_all_records():
+        try:
+            dt = datetime.strptime(
+                str(r.get("Timestamp", "")), "%Y-%m-%d %H:%M UTC"
+            ).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        weight = parse_weight(r.get("Current Weight"))
+        if weight is None:
+            continue
+        rows.append({
+            "user_id": str(r.get("User ID")),
+            "username": str(r.get("Username") or "Unknown"),
+            "date": dt,
+            "weight": weight,
+            "starting": parse_weight(r.get("Starting Weight")),
+        })
+    rows.sort(key=lambda h: h["date"])
+    return rows

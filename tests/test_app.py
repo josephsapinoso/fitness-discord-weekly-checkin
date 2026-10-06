@@ -59,6 +59,7 @@ os.environ.update(
 import app as app_module  # noqa: E402
 import discord_api  # noqa: E402
 import goals  # noqa: E402
+import recap  # noqa: E402
 import sheets  # noqa: E402
 import streaks  # noqa: E402
 import tasks_queue  # noqa: E402
@@ -252,6 +253,11 @@ check("progress enqueued view=all", enqueued[-1][0]["kind"] == "progress" and en
 
 resp = signed_post(cmd_interaction("progress", [{"name": "share", "value": True}]))
 check("progress share → public defer", resp.get_json()["data"] == {})
+
+resp = signed_post(cmd_interaction("recap"))
+check("recap → deferred, public", resp.get_json() == {"type": 5})
+check("recap enqueued with its token",
+      enqueued[-1][0]["kind"] == "weekly_recap" and enqueued[-1][0]["token"] == "tok-abc")
 
 resp = signed_post(cmd_interaction("goal", [{"name": "set", "type": 1, "options": [{"name": "weight", "type": 10, "value": 170}]}]))
 check("goal set → deferred ephemeral", resp.get_json() == {"type": 5, "data": {"flags": 64}})
@@ -705,11 +711,85 @@ enqueued.clear()
 resp = client.post("/reminder", headers={"X-Reminder-Secret": "nope"})
 check("reminder wrong secret → 403", resp.status_code == 403)
 
-calls["post"].clear()
+# Scheduler only waits on the enqueue; the recap is built and posted by /process.
+calls["post"].clear(); enqueued.clear()
 resp = client.post("/reminder", headers={"X-Reminder-Secret": "s3cret"})
 check("reminder → 200", resp.status_code == 200)
+check("reminder enqueues the recap", enqueued[-1][0] == {"kind": "weekly_recap"})
+check("reminder posts nothing inline", calls["post"] == [])
+
+
+# If the enqueue itself fails, the plain prompt still goes out — a silent Monday
+# is the one outcome the reminder exists to prevent.
+def _enqueue_down(payload, self_url):
+    raise RuntimeError("tasks down")
+
+
+tasks_queue.enqueue = _enqueue_down
+calls["post"].clear()
+resp = client.post("/reminder", headers={"X-Reminder-Secret": "s3cret"})
+check("enqueue down → still 200", resp.status_code == 200)
 cid, payload, _ = calls["post"][0]
-check("reminder embed", payload["embeds"][0]["title"].startswith("🏋️") and cid == "999888777")
+check("enqueue down → plain reminder posted inline",
+      payload["embeds"][0]["title"].startswith("🏋️") and cid == "999888777" and "fields" not in payload["embeds"][0])
+tasks_queue.enqueue = fake_enqueue
+
+# The recap task. Rows are placed relative to this Monday in the local zone.
+_tz = streaks.LOCAL_TZ
+_loc_today = datetime.now(timezone.utc).astimezone(_tz).date()
+_this_mon = _loc_today - timedelta(days=_loc_today.weekday())
+
+
+def _on(weeks_ago: int, uid: str, name: str, weight: float, dow: int = 2):
+    d = _this_mon - timedelta(weeks=weeks_ago) + timedelta(days=dow)
+    return {"user_id": uid, "username": name, "weight": weight, "starting": None,
+            "date": datetime(d.year, d.month, d.day, 12, tzinfo=_tz).astimezone(timezone.utc)}
+
+
+_recap_rows = (
+    [_on(k, "1", "joe", w) for k, w in zip((5, 4, 3, 2, 1), (200, 199, 198, 197, 195))]
+    + [_on(3, "2", "amy", 150)]
+    + [_on(2, "3", "bob", 190), _on(1, "3", "bob", 189)]
+)
+sheets.get_all_checkins = lambda: _recap_rows
+calls["post"].clear(); calls["edit"].clear()
+resp = client.post("/process", json={"kind": "weekly_recap"}, headers={"X-Task-Secret": "s3cret"})
+check("recap task → 200, one channel post", resp.status_code == 200 and len(calls["post"]) == 1 and calls["edit"] == [])
+_recap = calls["post"][0][1]["embeds"][0]
+check("recap keeps the check-in prompt", _recap["title"].startswith("🏋️") and "/checkin" in _recap["description"])
+_rf = {f["name"].split(" (")[0]: f["value"] for f in _recap["fields"]}
+check("recap lists last week", "📋 Last week" in _rf, str(list(_rf)))
+_week = _rf["📋 Last week"]
+check("recap: joe checked in with a 5-week streak and his change",
+      "✅ **joe** · 🔥 5 wk · 📉 -2.0 lbs" in _week, _week)
+check("recap: bob's 2-week streak and change", "✅ **bob** · 🔥 2 wk · 📉 -1.0 lbs" in _week, _week)
+check("recap: amy missed", "— **amy** · missed last week" in _week, _week)
+check("recap: checked-in members first", _week.index("bob") < _week.index("joe") < _week.index("amy"))
+check("recap: group total", _rf["👥 Group"] == "Combined: 📉 -6.0 lbs since everyone started", _rf["👥 Group"])
+check("recap: biggest mover by percent", _rf["🏆 Biggest mover"] == "**joe** (-1.0% last week)", _rf["🏆 Biggest mover"])
+
+# /recap answers the deferred interaction instead of posting a second copy.
+calls["post"].clear(); calls["edit"].clear()
+client.post("/process", json={"kind": "weekly_recap", "token": "tok-recap", "user": USER}, headers={"X-Task-Secret": "s3cret"})
+check("/recap → edits the deferred reply, no channel post",
+      calls["post"] == [] and calls["edit"][0][0] == "tok-recap" and "fields" in calls["edit"][0][1]["embeds"][0])
+
+# Nobody has checked in yet → just the prompt.
+sheets.get_all_checkins = lambda: []
+calls["post"].clear()
+client.post("/process", json={"kind": "weekly_recap"}, headers={"X-Task-Secret": "s3cret"})
+check("empty sheet → plain prompt, no fields", "fields" not in calls["post"][0][1]["embeds"][0])
+
+# Sheets down → the prompt still posts (the admin alert path is covered in 6b).
+def _all_checkins_down():
+    raise RuntimeError("sheets down")
+
+
+sheets.get_all_checkins = _all_checkins_down
+calls["post"].clear()
+resp = client.post("/process", json={"kind": "weekly_recap"}, headers={"X-Task-Secret": "s3cret"})
+check("recap data failure → 200 and plain prompt posted",
+      resp.status_code == 200 and len(calls["post"]) == 1 and "fields" not in calls["post"][0][1]["embeds"][0])
 
 # ── 8. discord_api multipart building ──────────────────────────────────────────
 import importlib
@@ -732,10 +812,10 @@ import register_commands
 
 by_name = {c["name"]: c for c in register_commands.COMMANDS}
 check(
-    "9 commands registered",
+    "10 commands registered",
     sorted(by_name) == sorted(
         ["checkin", "summary", "progress", "history", "day1",
-         "collage", "howto", "photo-replace", "goal"]
+         "collage", "howto", "photo-replace", "goal", "recap"]
     ),
     str(sorted(by_name)),
 )
@@ -1252,6 +1332,34 @@ resp = client.post("/process", json={"kind": "no-such-kind", "token": "tok-unkno
 check("unknown task kind → still 200", resp.status_code == 200)
 check("unknown task kind → user gets an answer",
       len(calls["edit"]) == 1 and "went wrong" in calls["edit"][-1][1]["content"])
+
+# ── Recap maths ────────────────────────────────────────────────────────────────
+_wed = datetime(2026, 10, 7).date()  # a Wednesday → last week is Sep 28 – Oct 4
+check("recap: last week bounds", recap.last_week_bounds(_wed) == (datetime(2026, 9, 28).date(), datetime(2026, 10, 4).date()))
+check("recap: Monday's last week is the week just ended",
+      recap.last_week_bounds(datetime(2026, 10, 5).date()) == (datetime(2026, 9, 28).date(), datetime(2026, 10, 4).date()))
+
+
+def _row(uid, name, y, m, d, w, starting=None):
+    return {"user_id": uid, "username": name, "weight": w, "starting": starting,
+            "date": datetime(y, m, d, 18, tzinfo=timezone.utc)}
+
+
+_s = recap.summarize_week([_row("1", "joe", 2026, 9, 22, 190), _row("1", "joe", 2026, 9, 29, 189), _row("1", "joe", 2026, 10, 3, 188)], _wed)
+check("recap: two check-ins in one week → latest weight, one member",
+      len(_s["members"]) == 1 and _s["members"][0]["change"] == -2 and _s["members"][0]["streak"] == 2)
+check("recap: week label", _s["week_label"] == "Sep 28 – Oct 04")
+_s = recap.summarize_week([_row("1", "joe", 2026, 9, 22, 190), _row("1", "joe", 2026, 9, 30, 192)], _wed)
+check("recap: everyone gained → no biggest mover", _s["biggest_mover"] is None and _s["members"][0]["change"] == 2)
+_s = recap.summarize_week([_row("1", "joe", 2026, 9, 30, 192)], _wed)
+check("recap: first-ever check-in last week → checked in, no change",
+      _s["members"][0]["checked_in"] and _s["members"][0]["change"] is None and _s["members"][0]["total"] == 0)
+_s = recap.summarize_week([_row("1", "joe", 2026, 9, 1, 200, starting=210), _row("1", "joe", 2026, 9, 30, 195)], _wed)
+check("recap: total uses the recorded starting weight", _s["members"][0]["total"] == -15 and _s["combined"] == -15)
+_s = recap.summarize_week([_row("1", "joe", 2026, 9, 8, 200), _row("1", "joe", 2026, 9, 15, 199)], _wed)
+check("recap: a member who missed last week reads streak 0",
+      not _s["members"][0]["checked_in"] and _s["members"][0]["streak"] == 0)
+check("recap: empty", recap.summarize_week([], _wed) == {"week_label": "Sep 28 – Oct 04", "members": [], "combined": 0, "biggest_mover": None})
 
 # ── Goal maths ─────────────────────────────────────────────────────────────────
 _gp = goals.progress(200, 185, 170)

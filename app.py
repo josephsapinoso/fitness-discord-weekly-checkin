@@ -9,8 +9,8 @@ Cloud Run's free tier:
                         (signature-verified, must be acked within 3 seconds)
   POST /process       — Cloud Tasks calls back here to do the slow work
                         (Sheets reads/writes, chart rendering) after the ack
-  POST /reminder      — Cloud Scheduler hits this every Monday to post the
-                        weekly check-in prompt
+  POST /reminder      — Cloud Scheduler hits this every Monday; it enqueues the
+                        weekly recap + check-in prompt (built in /process)
   GET  /              — health check
 
 Commands:
@@ -23,6 +23,7 @@ Commands:
   /photo-replace  — swap the photo stored for a given date
   /howto          — a pinnable explainer for the weekly check-in
   /goal           — set or clear your goal weight (shown on /progress + check-ins)
+  /recap          — post last week's group recap now (the Monday post, on demand)
 """
 
 import concurrent.futures
@@ -43,6 +44,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 import discord_api
 import goals
+import recap
 import streaks
 
 load_dotenv()
@@ -390,6 +392,7 @@ def _build_howto_embed() -> dict:
                     "`/collage` — a grid of your progress photos\n"
                     "`/photo-replace` — swap the photo for a specific date\n"
                     "`/summary` — everyone's latest check-ins\n"
+                    "`/recap` — last week's group recap (also posts itself every Monday)\n"
                     "`/history` — link to the full spreadsheet"
                 ),
             },
@@ -491,6 +494,42 @@ def _reminder_embed() -> dict:
         "color": discord_api.COLOR_GOLD,
         "footer": {"text": "Consistency is key 💪"},
     }
+
+
+def _arrow(delta: float) -> str:
+    return "📉" if delta < 0 else ("📈" if delta > 0 else "➡️")
+
+
+def _build_recap_embed(summary: dict) -> dict:
+    """The Monday post: the check-in prompt plus what happened last week."""
+    embed = _reminder_embed()
+    members = summary["members"]
+    if not members:
+        return embed
+
+    lines = []
+    for m in members:
+        if not m["checked_in"]:
+            lines.append(f"— **{m['username']}** · missed last week")
+            continue
+        bits = [f"✅ **{m['username']}**"]
+        if m["streak"] >= 2:
+            bits.append(f"🔥 {m['streak']} wk")
+        if m["change"] is not None:
+            bits.append(f"{_arrow(m['change'])} {m['change']:+.1f} lbs")
+        lines.append(" · ".join(bits))
+
+    combined = summary["combined"]
+    embed["fields"] = [
+        {"name": f"📋 Last week ({summary['week_label']})", "value": "\n".join(lines)[:1024], "inline": False},
+        {"name": "👥 Group", "value": f"Combined: {_arrow(combined)} {combined:+.1f} lbs since everyone started", "inline": False},
+    ]
+    if summary["biggest_mover"]:
+        bm = summary["biggest_mover"]
+        embed["fields"].append(
+            {"name": "🏆 Biggest mover", "value": f"**{bm['username']}** ({bm['pct']:+.1f}% last week)", "inline": False}
+        )
+    return embed
 
 
 # ── /progress payload (embed + optional chart + view buttons) ──────────────────
@@ -890,6 +929,12 @@ def _handle_command(interaction: dict):
         )
         return jsonify({"type": DEFERRED_CHANNEL_MESSAGE, "data": {"flags": EPHEMERAL}})
 
+    if name == "recap":
+        tasks_queue.enqueue(
+            {"kind": "weekly_recap", "token": interaction["token"], "user": user}, _self_url()
+        )
+        return jsonify({"type": DEFERRED_CHANNEL_MESSAGE})
+
     if name == "goal":
         sub = (interaction["data"].get("options") or [{}])[0]
         task = {
@@ -1115,6 +1160,8 @@ def process_task():
             _task_goal_set(payload)
         elif kind == "goal_clear":
             _task_goal_clear(payload)
+        elif kind == "weekly_recap":
+            _task_weekly_recap(payload)
         else:
             # The interaction is already deferred, so returning without a reply
             # leaves the user on "thinking…" forever. Always answer something.
@@ -1751,14 +1798,61 @@ def _task_goal_clear(payload: dict) -> None:
     })
 
 
+def _task_weekly_recap(payload: dict) -> None:
+    """Build and post the Monday recap; with a token it answers /recap instead.
+
+    The reminder must go out even when the recap can't be built, so any failure
+    in the data path degrades to the plain prompt (and tells the admin) rather
+    than leaving the channel silent on a Monday.
+    """
+    import sheets
+
+    try:
+        checkins = sheets.get_all_checkins()
+        today = datetime.now(timezone.utc).astimezone(streaks.LOCAL_TZ).date()
+        embed = _build_recap_embed(recap.summarize_week(checkins, today))
+    except Exception as e:
+        log.exception("Weekly recap failed; posting the plain reminder: %s", e)
+        _admin_alert(_format_task_failure("weekly_recap", payload, e))
+        embed = _reminder_embed()
+
+    if payload.get("token"):
+        # /recap: the deferred public message *is* the post — never also post
+        # to the channel, or the recap appears twice.
+        _reply(payload["token"], payload.get("user"), {"embeds": [embed]})
+    else:
+        discord_api.post_channel_message(os.environ["CHECKIN_CHANNEL_ID"], {"embeds": [embed]})
+    log.info("Weekly recap posted.")
+
+
 # ── Weekly reminder (called by Cloud Scheduler) ────────────────────────────────
 @app.post("/reminder")
 def reminder():
+    """Enqueue the recap and return at once.
+
+    Scheduler only waits on the enqueue, so a slow Sheets read can never trip
+    its attempt deadline and make it retry — which would post twice. If even
+    the enqueue fails, post the plain prompt inline rather than nothing.
+    """
     _check_secret("X-Reminder-Secret")
-    discord_api.post_channel_message(
-        os.environ["CHECKIN_CHANNEL_ID"], {"embeds": [_reminder_embed()]}
-    )
-    log.info("Weekly reminder posted.")
+    import tasks_queue
+
+    try:
+        tasks_queue.enqueue({"kind": "weekly_recap"}, _self_url())
+        log.info("Weekly recap enqueued.")
+    except Exception as e:
+        log.exception("Recap enqueue failed; posting the plain reminder: %s", e)
+        try:
+            discord_api.post_channel_message(
+                os.environ["CHECKIN_CHANNEL_ID"], {"embeds": [_reminder_embed()]}
+            )
+            log.info("Weekly reminder posted.")
+        except Exception as e2:
+            log.error("Plain reminder also failed: %s", e2)
+        _admin_alert(
+            f"⚠️ Weekly recap could not be enqueued ({type(e).__name__}: {e}); "
+            "the plain reminder was posted inline instead."
+        )
     return "ok", 200
 
 
