@@ -459,9 +459,6 @@ Rotate the bot token and service account key every 6–12 months:
 - A `/photos` command to list or clear your own stored photos (self-service deletion)
 - Multi-point comparisons (Day 1 → midpoint → now) rather than just two panels
 
-**Streak tracking:**
-- Track consecutive weeks checked in and post streak milestones
-
 **Notifications:**
 - DM members who haven't checked in by a certain day of the week
 

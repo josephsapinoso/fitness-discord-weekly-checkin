@@ -20,6 +20,7 @@ free tier ($0/month)** as a Discord HTTP interactions endpoint — no always-on 
 - `/collage` — a grid of your archived progress photos over time
 - `/photo-replace` — swap the photo stored for a given date (with autocomplete)
 - `/howto` — a pinnable explainer for how the weekly check-in works
+- **Streaks** — consecutive weeks checked in (Monday–Sunday, Pacific) show on every check-in and on `/progress`; 4, 8, 12, 26 and 52 weeks get a 🏅 post
 - **Weekly reminder** — Cloud Scheduler posts a prompt every Monday at 8 AM Pacific (configurable, no redeploy needed)
 
 ### Progress photos & before/after

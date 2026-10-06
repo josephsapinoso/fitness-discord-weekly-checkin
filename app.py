@@ -40,6 +40,7 @@ from nacl.signing import VerifyKey
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import discord_api
+import streaks
 
 load_dotenv()
 
@@ -258,8 +259,10 @@ def _build_checkin_embed(
     proud_of: str,
     can_work_on: str,
     last_focus: str | None = None,
+    streak: int = 0,
 ) -> dict:
     week_str = datetime.now(timezone.utc).strftime("Week of %B %d, %Y")
+    footer = f"🔥 {streak}-week streak · Keep it up! 💪" if streak >= 2 else "Keep it up! 💪"
     total = _change_suffix(current, starting).strip()
     fields = [
         {"name": "⚖️ Current Weight", "value": f"{current}{_change_suffix(current, last_week)}", "inline": True},
@@ -281,7 +284,26 @@ def _build_checkin_embed(
         "color": discord_api.COLOR_GREEN,
         "thumbnail": {"url": discord_api.avatar_url(user)},
         "fields": fields,
-        "footer": {"text": "Keep it up! 💪"},
+        "footer": {"text": footer},
+    }
+
+
+MILESTONE_LINES = {
+    4: "A month of showing up, every single week.",
+    8: "Two months straight. That's not luck, that's a habit.",
+    12: "A full quarter without missing a week.",
+    26: "Half a year. Most people never get here.",
+    52: "A full year. Fifty-two check-ins in a row. 🎉",
+}
+
+
+def _build_milestone_embed(user: dict, member: dict | None, streak: int) -> dict:
+    return {
+        "title": f"🏅 {streak}-week streak — {discord_api.display_name(user, member)}",
+        "description": MILESTONE_LINES.get(streak, f"{streak} weeks in a row."),
+        "color": discord_api.COLOR_GOLD,
+        "thumbnail": {"url": discord_api.avatar_url(user)},
+        "footer": {"text": "Consistency beats perfection 💪"},
     }
 
 
@@ -503,6 +525,10 @@ def _build_progress_payload(history: list[dict], view: str, user: dict, member: 
         {"name": "⚖️ Current", "value": f"{stats['current']:.1f} lbs", "inline": True},
         {"name": "Overall", "value": f"{total_arrow} {total:+.1f} lbs", "inline": True},
     ]
+    s = streaks.compute_streaks(history)
+    embed["fields"].append(
+        {"name": "🔥 Streak", "value": f"{s['current']} wk (best {s['longest']})", "inline": True}
+    )
 
     if len(period) >= 2:
         pc = stats["period_change"]
@@ -1080,6 +1106,22 @@ def _task_checkin_submit(payload: dict) -> None:
         starting = last_focus = None
     starting = starting or v["current_weight"]
 
+    # Streak: the run of consecutive weeks ending at this check-in. Read before
+    # log_checkin for the same reason as above, then add this check-in locally.
+    # A milestone posts only when this check-in *reaches* it, so a second
+    # check-in in the same week can't repeat the celebration.
+    try:
+        history = sheets.get_user_history(user["id"])
+    except Exception as e:
+        log.warning("History lookup for streak failed: %s", e)
+        history = []
+    streak_before = streaks.compute_streaks(history)["current"]
+    history = list(history) + [{
+        "date": datetime.now(timezone.utc),
+        "weight": sheets.parse_weight(v["current_weight"]) or 0.0,
+    }]
+    streak = streaks.compute_streaks(history)["current"]
+
     sheets.log_checkin(
         user_id=user["id"],
         username=payload["username"],
@@ -1098,10 +1140,20 @@ def _task_checkin_submit(payload: dict) -> None:
         proud_of=v["proud_of"],
         can_work_on=v["can_work_on"],
         last_focus=last_focus,
+        streak=streak,
     )
     # The text check-in always posts and confirms independently of any photo, so
     # a photo/compose failure can never lose the written check-in.
     discord_api.post_channel_message(os.environ["CHECKIN_CHANNEL_ID"], {"embeds": [embed]})
+
+    if streak in streaks.MILESTONES and streak > streak_before:
+        try:
+            discord_api.post_channel_message(
+                os.environ["CHECKIN_CHANNEL_ID"],
+                {"embeds": [_build_milestone_embed(user, member, streak)]},
+            )
+        except Exception as e:  # a celebration must never fail the check-in
+            log.warning("Milestone post failed: %s", e)
 
     photo_url = payload.get("photo_url")
     if not photo_url:
