@@ -110,15 +110,16 @@ variable, and not a loop in the code. Changing it needs no redeploy:
 ```bash
 gcloud scheduler jobs update http weekly-checkin-reminder \
   --location=us-west1 \
-  --schedule="0 9 * * 1" \
-  --time-zone="Etc/UTC"
+  --schedule="0 8 * * 1" \
+  --time-zone="America/Los_Angeles"
 ```
 
 `--schedule` is standard cron (`minute hour day-of-month month day-of-week`).
 
 | Goal | `--schedule` | `--time-zone` |
 |------|--------------|---------------|
-| Monday 9:00 AM UTC (current) | `0 9 * * 1` | `Etc/UTC` |
+| Monday 8:00 AM Pacific (current) | `0 8 * * 1` | `America/Los_Angeles` |
+| Monday 9:00 AM UTC (v1) | `0 9 * * 1` | `Etc/UTC` |
 | Friday 5:00 PM Pacific | `0 17 * * 5` | `America/Los_Angeles` |
 | Sunday 8:30 PM Eastern | `30 20 * * 0` | `America/New_York` |
 

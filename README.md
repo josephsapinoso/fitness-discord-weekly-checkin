@@ -20,7 +20,7 @@ free tier ($0/month)** as a Discord HTTP interactions endpoint — no always-on 
 - `/collage` — a grid of your archived progress photos over time
 - `/photo-replace` — swap the photo stored for a given date (with autocomplete)
 - `/howto` — a pinnable explainer for how the weekly check-in works
-- **Weekly reminder** — Cloud Scheduler posts a prompt every Monday at 9 AM UTC (configurable, no redeploy needed)
+- **Weekly reminder** — Cloud Scheduler posts a prompt every Monday at 8 AM Pacific (configurable, no redeploy needed)
 
 ### Progress photos & before/after
 
@@ -49,7 +49,7 @@ Discord ──(signed HTTPS interaction)──▶ Cloud Run: POST /interactions
                                           │  Sheets read/write, chart render,
                                           │  edit the deferred response
                                           ▼
-Cloud Scheduler ──(Mon 9:00 UTC)──▶ POST /reminder ──▶ check-in channel
+Cloud Scheduler ──(Mon 8:00 PT)───▶ POST /reminder ──▶ check-in channel
 ```
 
 There is no gateway connection and no resident process — Discord signs and POSTs
