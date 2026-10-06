@@ -59,6 +59,7 @@ os.environ.update(
 import app as app_module  # noqa: E402
 import discord_api  # noqa: E402
 import sheets  # noqa: E402
+import streaks  # noqa: E402
 import tasks_queue  # noqa: E402
 
 # The health route's warm-up opens the real sheet; keep the suite offline.
@@ -387,6 +388,64 @@ for label, stub, expected in [
           not any(f["name"] == "🔁 Last week's focus" for f in calls["post"][-1][1]["embeds"][0]["fields"]))
 sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs", "Sleep more")
 
+# Streaks on the check-in embed. The task reads history before writing the row
+# and adds this check-in itself, so the footer counts the week being logged.
+_now = datetime.now(timezone.utc)
+_weekly = lambda ks: [{"date": _now - timedelta(weeks=k), "weight": 190.0} for k in ks]  # noqa: E731
+
+
+def _footer():
+    return calls["post"][-1][1]["embeds"][0]["footer"]["text"]
+
+
+def _milestones():
+    return [p for p in calls["post"] if p[1].get("embeds", [{}])[0].get("title", "").startswith("🏅")]
+
+
+sheets.get_user_history = lambda uid: _weekly([3, 2, 1])
+calls["post"].clear()
+client.post("/process", json=submit_body, headers={"X-Task-Secret": "s3cret"})
+_posts = list(calls["post"])
+_checkin_footer = _posts[0][1]["embeds"][0]["footer"]["text"]
+check("4th consecutive week → streak in footer", _checkin_footer.startswith("🔥 4-week streak"), _checkin_footer)
+check("4th consecutive week → milestone posted", len(_milestones()) == 1 and _milestones()[0][0] == "999888777")
+check("milestone names the streak and the member",
+      _milestones()[0][1]["embeds"][0]["title"] == "🏅 4-week streak — Joe")
+check("check-in embed posts before the milestone", _posts[0][1]["embeds"][0]["title"].startswith("Weekly Check-in"))
+
+# Already checked in this week: same streak, but no second celebration.
+sheets.get_user_history = lambda uid: _weekly([3, 2, 1, 0])
+calls["post"].clear()
+client.post("/process", json=submit_body, headers={"X-Task-Secret": "s3cret"})
+check("second check-in this week → streak unchanged", _footer().startswith("🔥 4-week streak"), _footer())
+check("second check-in this week → no repeat milestone", _milestones() == [])
+
+# A gap: last check-in three weeks ago → this is week 1 of a new streak.
+sheets.get_user_history = lambda uid: _weekly([3])
+calls["post"].clear()
+client.post("/process", json=submit_body, headers={"X-Task-Secret": "s3cret"})
+check("broken streak → plain footer", _footer() == "Keep it up! 💪", _footer())
+
+# Two weeks running shows, but isn't a milestone.
+sheets.get_user_history = lambda uid: _weekly([1])
+calls["post"].clear()
+client.post("/process", json=submit_body, headers={"X-Task-Secret": "s3cret"})
+check("2-week streak → footer", _footer().startswith("🔥 2-week streak"), _footer())
+check("2-week streak → no milestone", _milestones() == [])
+
+# History unavailable → the check-in still posts, just without a streak.
+sheets.get_user_history = _raise_sheets
+calls["post"].clear()
+resp = client.post("/process", json=submit_body, headers={"X-Task-Secret": "s3cret"})
+check("history raises → still 200 and posted", resp.status_code == 200 and len(calls["post"]) == 1)
+check("history raises → plain footer", _footer() == "Keep it up! 💪")
+
+# The fixture list must not be mutated by the task adding today's point.
+_fixture = _weekly([2, 1])
+sheets.get_user_history = lambda uid: _fixture
+client.post("/process", json=submit_body, headers={"X-Task-Secret": "s3cret"})
+check("task does not mutate the history it was given", len(_fixture) == 2)
+
 # summary task
 sheets.get_latest_checkins = lambda limit=10: [
     {"Username": "joe", "Current Weight": "185", "Last Week Weight": 186.2, "Proud Of": "Ran", "Can Work On": "Sleep"},
@@ -430,6 +489,8 @@ check(
 check("active button highlighted", buttons[0]["style"] == 1 and buttons[1]["style"] == 2)
 field_names = [f["name"] for f in embed["fields"]]
 check("progress stats fields", {"🚀 Starting", "⚖️ Current", "Overall", "Pace", "Check-ins"} <= set(field_names))
+check("progress shows the streak",
+      next(f for f in embed["fields"] if f["name"] == "🔥 Streak")["value"] == "13 wk (best 13)")
 
 # progress: 30d view via button — only recent points
 calls["edit"].clear()
@@ -1111,6 +1172,40 @@ resp = client.post("/process", json={"kind": "no-such-kind", "token": "tok-unkno
 check("unknown task kind → still 200", resp.status_code == 200)
 check("unknown task kind → user gets an answer",
       len(calls["edit"]) == 1 and "went wrong" in calls["edit"][-1][1]["content"])
+
+# ── Streaks: consecutive local weeks ───────────────────────────────────────────
+def _at(y, m, d, h=12):
+    return {"date": datetime(y, m, d, h, tzinfo=timezone.utc), "weight": 1.0}
+
+
+check("streaks: empty", streaks.compute_streaks([]) == {"current": 0, "longest": 0, "weeks": 0})
+_five = [_at(2026, 1, 5 + 7 * k) for k in range(4)] + [_at(2026, 2, 2)]
+check("streaks: five consecutive weeks", streaks.compute_streaks(_five) == {"current": 5, "longest": 5, "weeks": 5})
+_gap = [_at(2026, 1, 5), _at(2026, 1, 12), _at(2026, 1, 19), _at(2026, 2, 2), _at(2026, 2, 9)]
+check("streaks: a gap resets current but keeps longest",
+      streaks.compute_streaks(_gap) == {"current": 2, "longest": 3, "weeks": 5})
+check("streaks: two check-ins in one week count once",
+      streaks.compute_streaks([_at(2026, 1, 5), _at(2026, 1, 8)])["weeks"] == 1)
+check("streaks: Mon→Sun order within a week irrelevant",
+      streaks.compute_streaks([_at(2026, 1, 11), _at(2026, 1, 12)]) == {"current": 2, "longest": 2, "weeks": 2})
+check("streaks: year boundary is consecutive",
+      streaks.compute_streaks([_at(2025, 12, 29), _at(2026, 1, 5)])["current"] == 2)
+# Sunday 22:00 Pacific is Monday 06:00 UTC — it belongs to the Sunday's week.
+check("streaks: late Sunday Pacific stays in its week",
+      streaks.compute_streaks([_at(2026, 1, 5), _at(2026, 1, 12, 6)])["weeks"] == 1)
+check("streaks: Monday 08:00 Pacific starts the next week",
+      streaks.compute_streaks([_at(2026, 1, 5), _at(2026, 1, 12, 16)])["weeks"] == 2)
+# as_of: the recap's view of "last week".
+_run = [_at(2026, 1, 5), _at(2026, 1, 12), _at(2026, 1, 19)]
+check("streaks: as_of in the latest week → unchanged",
+      streaks.compute_streaks(_run, as_of=datetime(2026, 1, 22, tzinfo=timezone.utc))["current"] == 3)
+check("streaks: as_of a week later → reset",
+      streaks.compute_streaks(_run, as_of=datetime(2026, 1, 28, tzinfo=timezone.utc))["current"] == 0)
+check("streaks: as_of ignores later check-ins",
+      streaks.compute_streaks(_run, as_of=datetime(2026, 1, 14, tzinfo=timezone.utc)) == {"current": 2, "longest": 2, "weeks": 2})
+check("streaks: naive datetimes are treated as UTC",
+      streaks.week_index(datetime(2026, 1, 5, 12)) == streaks.week_index(datetime(2026, 1, 5, 12, tzinfo=timezone.utc)))
+check("streaks: milestones", streaks.MILESTONES == (4, 8, 12, 26, 52))
 
 # ── Sheet headers reconcile without moving data ────────────────────────────────
 # The rollback guarantee lives here. If v2 adds a column and someone reverts to

@@ -56,6 +56,9 @@ top, one line per change, so a rollback's blast radius is readable at a glance:
 - **Last week's focus.** `get_user_prefill` returns a third value (the latest "Can Work
   On"); the `/checkin` form shows it as the Proud-of placeholder and the public embed gets a
   "🔁 Last week's focus" field. Same single prefill read; no schema change.
+- **Streaks** (`streaks.py`, new dependency `tzdata`). Consecutive Pacific weeks with a
+  check-in: shown in the check-in embed footer and as a `/progress` field; 4/8/12/26/52
+  post a 🏅 milestone embed. Computed from existing rows; no schema change.
 
 ---
 
