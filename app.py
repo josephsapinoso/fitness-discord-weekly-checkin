@@ -22,12 +22,14 @@ Commands:
   /collage        — a grid of your archived progress photos
   /photo-replace  — swap the photo stored for a given date
   /howto          — a pinnable explainer for the weekly check-in
+  /goal           — set or clear your goal weight (shown on /progress + check-ins)
 """
 
 import concurrent.futures
 import io
 import json
 import logging
+import math
 import os
 import time
 import traceback
@@ -40,6 +42,7 @@ from nacl.signing import VerifyKey
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import discord_api
+import goals
 import streaks
 
 load_dotenv()
@@ -260,6 +263,7 @@ def _build_checkin_embed(
     can_work_on: str,
     last_focus: str | None = None,
     streak: int = 0,
+    goal_line: str | None = None,
 ) -> dict:
     week_str = datetime.now(timezone.utc).strftime("Week of %B %d, %Y")
     footer = f"🔥 {streak}-week streak · Keep it up! 💪" if streak >= 2 else "Keep it up! 💪"
@@ -270,6 +274,9 @@ def _build_checkin_embed(
         {"name": "🚀 Starting Weight", "value": starting, "inline": True},
         {"name": "📊 Total Change", "value": f"{total} lbs" if total else "—", "inline": False},
     ]
+    if goal_line:
+        # 🏁 rather than 🎯: "🎯 Can Work On" is already on this embed.
+        fields.append({"name": "🏁 Goal", "value": goal_line, "inline": False})
     if last_focus:
         # What they said they'd work on, right above what they're proud of —
         # the accountability the weekly format is for.
@@ -379,6 +386,7 @@ def _build_howto_embed() -> dict:
                 "name": "🛠️ Other commands",
                 "value": (
                     "`/progress` — your weight chart\n"
+                    "`/goal set <weight>` — your target; progress and a projected date show on `/progress`\n"
                     "`/collage` — a grid of your progress photos\n"
                     "`/photo-replace` — swap the photo for a specific date\n"
                     "`/summary` — everyone's latest check-ins\n"
@@ -500,7 +508,10 @@ def _progress_buttons(current_view: str, owner_id: str) -> list[dict]:
     return [{"type": 1, "components": buttons}]  # one action row
 
 
-def _build_progress_payload(history: list[dict], view: str, user: dict, member: dict | None):
+def _build_progress_payload(
+    history: list[dict], view: str, user: dict, member: dict | None,
+    goal: float | None = None,
+):
     """Returns (embed_dict, chart_BytesIO_or_None)."""
     import charts
 
@@ -529,6 +540,9 @@ def _build_progress_payload(history: list[dict], view: str, user: dict, member: 
     embed["fields"].append(
         {"name": "🔥 Streak", "value": f"{s['current']} wk (best {s['longest']})", "inline": True}
     )
+    gp = goals.progress(stats["starting"], stats["current"], goal) if goal is not None else None
+    if goal is not None:
+        embed["fields"].append({"name": "🎯 Goal", "value": goals.describe(goal, gp), "inline": True})
 
     if len(period) >= 2:
         pc = stats["period_change"]
@@ -545,7 +559,22 @@ def _build_progress_payload(history: list[dict], view: str, user: dict, member: 
         embed["fields"].append(
             {"name": "Check-ins", "value": str(stats["checkins"]), "inline": True}
         )
-        chart_buf = charts.render_progress_chart(period, view, name)
+        # The slope already exists; turning it into a date is the single most
+        # motivating number the bot can show. Needs 3+ points so one bad weigh-in
+        # can't project a date, and goals.projected_date refuses wrong-sign or
+        # multi-year answers.
+        if gp is not None and len(period) >= 3:
+            proj = goals.projected_date(
+                gp["remaining"], pace, gp["direction"], datetime.now(timezone.utc).date()
+            )
+            if proj:
+                when, weeks = proj
+                embed["fields"].append({
+                    "name": "📅 Projected",
+                    "value": f"{when:%b %d, %Y} (~{max(1, round(weeks))} weeks at this pace)",
+                    "inline": True,
+                })
+        chart_buf = charts.render_progress_chart(period, view, name, goal=goal)
         embed["image"] = {"url": "attachment://progress.png"}
         return embed, chart_buf
 
@@ -861,6 +890,20 @@ def _handle_command(interaction: dict):
         )
         return jsonify({"type": DEFERRED_CHANNEL_MESSAGE, "data": {"flags": EPHEMERAL}})
 
+    if name == "goal":
+        sub = (interaction["data"].get("options") or [{}])[0]
+        task = {
+            "kind": "goal_clear" if sub.get("name") == "clear" else "goal_set",
+            "token": interaction["token"],
+            "user": user,
+            "username": _username(user),
+        }
+        if task["kind"] == "goal_set":
+            opts = {o["name"]: o.get("value") for o in sub.get("options", [])}
+            task["goal"] = opts.get("weight")
+        tasks_queue.enqueue(task, _self_url())
+        return jsonify({"type": DEFERRED_CHANNEL_MESSAGE, "data": {"flags": EPHEMERAL}})
+
     if name == "history":
         import sheets
 
@@ -1068,6 +1111,10 @@ def process_task():
             _task_photo_replace(payload)
         elif kind == "admin_alert":
             _admin_alert(payload.get("text", ""))
+        elif kind == "goal_set":
+            _task_goal_set(payload)
+        elif kind == "goal_clear":
+            _task_goal_clear(payload)
         else:
             # The interaction is already deferred, so returning without a reply
             # leaves the user on "thinking…" forever. Always answer something.
@@ -1122,6 +1169,17 @@ def _task_checkin_submit(payload: dict) -> None:
     }]
     streak = streaks.compute_streaks(history)["current"]
 
+    goal_line = None
+    try:
+        goal = sheets.get_goal(user["id"])
+    except Exception as e:
+        log.warning("Goal lookup failed: %s", e)
+        goal = None
+    if goal is not None:
+        s_w, c_w = sheets.parse_weight(starting), sheets.parse_weight(v["current_weight"])
+        if s_w is not None and c_w is not None:
+            goal_line = goals.describe(goal, goals.progress(s_w, c_w, goal))
+
     sheets.log_checkin(
         user_id=user["id"],
         username=payload["username"],
@@ -1141,6 +1199,7 @@ def _task_checkin_submit(payload: dict) -> None:
         can_work_on=v["can_work_on"],
         last_focus=last_focus,
         streak=streak,
+        goal_line=goal_line,
     )
     # The text check-in always posts and confirms independently of any photo, so
     # a photo/compose failure can never lose the written check-in.
@@ -1644,7 +1703,12 @@ def _task_progress(payload: dict) -> None:
         )
         return
 
-    embed, chart_buf = _build_progress_payload(history, view, user, member)
+    try:
+        goal = sheets.get_goal(user["id"])
+    except Exception as e:
+        log.warning("Goal lookup failed: %s", e)
+        goal = None
+    embed, chart_buf = _build_progress_payload(history, view, user, member, goal=goal)
     body = {
         "embeds": [embed],
         "components": _progress_buttons(view, user["id"]),
@@ -1653,6 +1717,38 @@ def _task_progress(payload: dict) -> None:
     if chart_buf is None:
         body["attachments"] = []  # clear any previous chart
     _reply(payload["token"], user, body, file_buf=chart_buf)
+
+
+def _task_goal_set(payload: dict) -> None:
+    import sheets
+
+    user = payload["user"]
+    try:
+        goal = float(payload.get("goal"))
+    except (TypeError, ValueError):
+        goal = math.nan
+    if not math.isfinite(goal) or goal <= 0:
+        _reply(payload["token"], user,
+               {"content": "⚠️ That doesn't look like a weight. Try `/goal set 175`."})
+        return
+    sheets.set_goal(user["id"], payload["username"], goal)
+    _reply(payload["token"], user, {
+        "content": (
+            f"🎯 Goal set: **{goal:.1f} lbs**. You'll see how far along you are on "
+            "`/progress` and on every check-in."
+        )
+    })
+
+
+def _task_goal_clear(payload: dict) -> None:
+    import sheets
+
+    user = payload["user"]
+    had = sheets.clear_goal(user["id"])
+    _reply(payload["token"], user, {
+        "content": "🎯 Goal cleared." if had
+        else "You don't have a goal set — `/goal set <weight>` to add one."
+    })
 
 
 # ── Weekly reminder (called by Cloud Scheduler) ────────────────────────────────

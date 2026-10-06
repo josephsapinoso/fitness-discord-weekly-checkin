@@ -321,7 +321,7 @@ failure can never lose the written check-in. Check, in order:
 
 ### `/day1` doesn't appear in Discord
 
-Re-run `python register_commands.py` and confirm it prints **8** commands. This is the
+Re-run `python register_commands.py` and confirm it prints **9** commands. This is the
 easiest step to forget after deploying the photo feature. Global commands can take up to
 an hour to propagate.
 
@@ -441,6 +441,21 @@ Rotate the bot token and service account key every 6–12 months:
    `env.yaml` → redeploy → delete the old key.
 
 ---
+
+## Goal Weights
+
+`/goal set <weight>` stores one row per user in a **`Goals`** tab (`User ID | Username |
+Goal Weight | Set On`), auto-created on first use; the tab name is fixed, not an env var.
+`/goal clear` blanks the weight but keeps the row. With a goal set:
+
+- `/progress` shows **🎯 Goal** (lbs to go and % of the way from the starting weight) and,
+  once the window has 3+ points and the trend runs toward the goal, **📅 Projected** — the
+  date the current pace reaches it. Projections more than two years out are suppressed.
+  The chart draws the goal as a dashed gold line.
+- Every check-in embed shows a **🏁 Goal** line.
+
+To change someone's goal by hand, edit the `Goal Weight` cell; the user id column is text
+(written `RAW`) and must stay that way.
 
 ## Extending the Bot
 

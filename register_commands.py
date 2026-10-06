@@ -88,6 +88,28 @@ COMMANDS = [
             }
         ],
     },
+    {
+        "name": "goal",
+        "description": "Set or clear your goal weight",
+        "options": [
+            {
+                "type": 1,  # sub-command
+                "name": "set",
+                "description": "Set the weight you're aiming for",
+                "options": [
+                    {
+                        "type": 10,  # number
+                        "name": "weight",
+                        "description": "Goal weight in lbs",
+                        "required": True,
+                        "min_value": 50,
+                        "max_value": 1000,
+                    }
+                ],
+            },
+            {"type": 1, "name": "clear", "description": "Remove your goal weight"},
+        ],
+    },
 ]
 
 

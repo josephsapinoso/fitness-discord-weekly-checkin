@@ -59,6 +59,10 @@ top, one line per change, so a rollback's blast radius is readable at a glance:
 - **Streaks** (`streaks.py`, new dependency `tzdata`). Consecutive Pacific weeks with a
   check-in: shown in the check-in embed footer and as a `/progress` field; 4/8/12/26/52
   post a 🏅 milestone embed. Computed from existing rows; no schema change.
+- **Goal weight** (`/goal set|clear`, `goals.py`). New **`Goals`** tab (fixed name, one row
+  per user, id written RAW). `/progress` gains 🎯 Goal / 📅 Projected fields and a gold goal
+  line; check-ins gain a 🏁 Goal line. 9 commands. A v1 rollback ignores the tab, and
+  re-registering v1's list drops `/goal`.
 
 ---
 

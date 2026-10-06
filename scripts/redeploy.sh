@@ -90,8 +90,8 @@ fi
 
 step "4/6  Register slash commands (adds /day1)"
 # Needs a local .env with DISCORD_TOKEN + DISCORD_APPLICATION_ID.
-# Should print 8 commands: /checkin, /summary, /progress, /history, /day1,
-#                          /collage, /howto, /photo-replace
+# Should print 9 commands: /checkin, /summary, /progress, /history, /day1,
+#                          /collage, /howto, /photo-replace, /goal
 python register_commands.py
 
 step "5/6  Verify the keep-warm job still exists"

@@ -71,6 +71,11 @@ PHOTO_LOG_HEADERS = [
     "Active",        # "yes", or blank once superseded
 ]
 
+# One row per user: the weight they're aiming for. Its own tab so the append-only
+# Check-ins tab stays untouched. The tab name is fixed rather than an env var — a
+# fourth GOOGLE_*_TAB would need mirroring across three docs for no real gain.
+GOAL_HEADERS = ["User ID", "Username", "Goal Weight", "Set On"]
+
 
 def _get_client() -> gspread.Client:
     """Build an authenticated gspread client."""
@@ -181,6 +186,11 @@ def _get_photo_log_sheet() -> gspread.Worksheet:
     return _open_tab(
         os.environ.get("GOOGLE_PHOTO_LOG_TAB", "Photo Log"), PHOTO_LOG_HEADERS
     )
+
+
+def _get_goals_sheet() -> gspread.Worksheet:
+    """Open (or create) the per-user Goals worksheet."""
+    return _open_tab("Goals", GOAL_HEADERS)
 
 
 def warmup() -> None:
@@ -448,3 +458,53 @@ def get_user_history(user_id: int) -> list[dict]:
 def get_sheet_url() -> str:
     """Direct link to the spreadsheet (no API call needed)."""
     return f"https://docs.google.com/spreadsheets/d/{os.environ['GOOGLE_SHEET_ID']}"
+
+
+# ── Goals ──────────────────────────────────────────────────────────────────────
+def get_goal(user_id: int) -> float | None:
+    """The user's goal weight, or None when unset, cleared or unparseable."""
+    ws = _get_goals_sheet()
+    row = next(
+        (r for r in ws.get_all_records() if str(r.get("User ID")) == str(user_id)), None
+    )
+    if not row:
+        return None
+    return parse_weight(row.get("Goal Weight", ""))
+
+
+def set_goal(user_id: int, username: str, goal: float) -> None:
+    """Create or update the user's Goals row (one per user, like Photos)."""
+    ws = _get_goals_sheet()
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    values = {"Username": username, "Goal Weight": f"{goal:.1f}", "Set On": ts}
+
+    cell = ws.find(str(user_id), in_column=1)
+    if cell is None:
+        # RAW so the snowflake User ID is stored verbatim as text (USER_ENTERED
+        # would coerce the 18-digit id to a number and lose precision).
+        ws.append_row(
+            [str(user_id)] + [values[h] for h in GOAL_HEADERS[1:]],
+            value_input_option="RAW",
+        )
+        return
+    for header, value in values.items():
+        ws.update_cell(cell.row, GOAL_HEADERS.index(header) + 1, value)
+
+
+def clear_goal(user_id: int) -> bool:
+    """Blank the user's goal; returns whether there was one to clear.
+
+    The row stays (with its Set On stamp) so the tab remains one row per user.
+    """
+    ws = _get_goals_sheet()
+    cell = ws.find(str(user_id), in_column=1)
+    if cell is None:
+        return False
+    col = GOAL_HEADERS.index("Goal Weight") + 1
+    had = bool(str(ws.cell(cell.row, col).value or "").strip())
+    ws.update_cell(cell.row, col, "")
+    ws.update_cell(
+        cell.row, GOAL_HEADERS.index("Set On") + 1,
+        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+    )
+    return had
