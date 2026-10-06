@@ -379,12 +379,16 @@ def get_latest_checkins(limit: int = 20) -> list[dict]:
     return records[-limit:] if len(records) > limit else records
 
 
-def get_user_prefill(user_id: int) -> tuple[str | None, str | None]:
-    """Return (starting_weight, last_week_weight) for a user.
+def get_user_prefill(user_id: int) -> tuple[str | None, str | None, str | None]:
+    """Return (starting_weight, last_week_weight, last_focus) for a user.
 
     starting_weight: from the user's FIRST check-in (its Starting Weight,
                      falling back to its Current Weight).
     last_week_weight: the Current Weight from the user's MOST RECENT check-in.
+    last_focus: the "Can Work On" from that same most recent check-in, so the
+                next form can hold the user to it. One read serves all three:
+                this runs inside the /checkin modal's time budget, where a
+                second Sheets round trip is exactly what cannot be afforded.
 
     Note: gspread returns numeric cells as int/float, so values are coerced
     to str before use.
@@ -393,7 +397,7 @@ def get_user_prefill(user_id: int) -> tuple[str | None, str | None]:
     records = ws.get_all_records()
     user_records = [r for r in records if str(r.get("User ID")) == str(user_id)]
     if not user_records:
-        return None, None
+        return None, None, None
 
     def _clean(value) -> str | None:
         s = str(value).strip()
@@ -402,7 +406,8 @@ def get_user_prefill(user_id: int) -> tuple[str | None, str | None]:
     first, latest = user_records[0], user_records[-1]
     starting = _clean(first.get("Starting Weight", "")) or _clean(first.get("Current Weight", ""))
     last_week = _clean(latest.get("Current Weight", ""))
-    return starting, last_week
+    last_focus = _clean(latest.get("Can Work On", ""))
+    return starting, last_week, last_focus
 
 
 def parse_weight(value) -> float | None:
