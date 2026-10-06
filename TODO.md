@@ -16,7 +16,7 @@ Deployed via `scripts/redeploy.sh` after installing the gcloud CLI locally
 
 `.env` now carries `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`, `TASK_SECRET`,
 `TASKS_LOCATION`, and `TASKS_QUEUE` (synced from `env.yaml`), so it matches
-`.env.example`. `register_commands.py` registered **8** commands, confirmed against
+`.env.example`. `register_commands.py` registered every command in `COMMANDS` (8 at the time), confirmed against
 the live Discord API: `/checkin`, `/summary`, `/history`, `/progress` (share),
 `/day1` (photo attachment).
 

@@ -24,6 +24,7 @@ MUTED = "#80848e"
 BLURPLE = "#5865f2"
 GREEN = "#57f287"
 RED = "#ed4245"
+GOLD = "#f1c40f"
 
 VIEWS = {
     "all": {"label": "All-Time", "days": None},
@@ -66,9 +67,13 @@ def compute_stats(history: list[dict], period: list[dict]) -> dict:
 
 
 def render_progress_chart(
-    period: list[dict], view: str, display_name: str
+    period: list[dict], view: str, display_name: str, goal: float | None = None
 ) -> io.BytesIO:
-    """Render the weight chart for one view window; returns PNG bytes."""
+    """Render the weight chart for one view window; returns PNG bytes.
+
+    `goal` draws a dashed gold target line, kept inside the y-range so it is
+    visible even when the goal is well below (or above) every point so far.
+    """
     dates = [h["date"] for h in period]
     weights = [h["weight"] for h in period]
     losing = weights[-1] <= weights[0]
@@ -91,6 +96,13 @@ def render_progress_chart(
                 linestyle="--", alpha=0.85, zorder=2, label="Trend")
         ax.legend(loc="upper right", frameon=False, labelcolor=MUTED, fontsize=8)
 
+    if goal is not None:
+        ax.axhline(goal, color=GOLD, linewidth=1.3, linestyle=(0, (4, 3)),
+                   alpha=0.9, zorder=2)
+        ax.annotate(f"Goal {goal:.1f}", (dates[-1], goal),
+                    textcoords="offset points", xytext=(0, 4),
+                    ha="right", color=GOLD, fontsize=8)
+
     # Annotate first and latest points
     ax.annotate(f"{weights[0]:.1f}", (dates[0], weights[0]),
                 textcoords="offset points", xytext=(0, 10),
@@ -109,8 +121,9 @@ def render_progress_chart(
     ax.grid(True, color=MUTED, alpha=0.15, linewidth=0.6)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
     ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=8))
-    pad = max((max(weights) - min(weights)) * 0.15, 1.5)
-    ax.set_ylim(min(weights) - pad, max(weights) + pad)
+    spanned = weights + ([goal] if goal is not None else [])
+    pad = max((max(spanned) - min(spanned)) * 0.15, 1.5)
+    ax.set_ylim(min(spanned) - pad, max(spanned) + pad)
     fig.autofmt_xdate(rotation=0, ha="center")
     fig.tight_layout()
 

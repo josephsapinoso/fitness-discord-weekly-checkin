@@ -58,6 +58,7 @@ os.environ.update(
 
 import app as app_module  # noqa: E402
 import discord_api  # noqa: E402
+import goals  # noqa: E402
 import sheets  # noqa: E402
 import streaks  # noqa: E402
 import tasks_queue  # noqa: E402
@@ -251,6 +252,14 @@ check("progress enqueued view=all", enqueued[-1][0]["kind"] == "progress" and en
 
 resp = signed_post(cmd_interaction("progress", [{"name": "share", "value": True}]))
 check("progress share → public defer", resp.get_json()["data"] == {})
+
+resp = signed_post(cmd_interaction("goal", [{"name": "set", "type": 1, "options": [{"name": "weight", "type": 10, "value": 170}]}]))
+check("goal set → deferred ephemeral", resp.get_json() == {"type": 5, "data": {"flags": 64}})
+check("goal set enqueued with the weight",
+      enqueued[-1][0]["kind"] == "goal_set" and enqueued[-1][0]["goal"] == 170 and enqueued[-1][0]["username"] == "joe")
+resp = signed_post(cmd_interaction("goal", [{"name": "clear", "type": 1}]))
+check("goal clear → deferred ephemeral", resp.get_json() == {"type": 5, "data": {"flags": 64}})
+check("goal clear enqueued", enqueued[-1][0]["kind"] == "goal_clear" and "goal" not in enqueued[-1][0])
 
 resp = signed_post(cmd_interaction("history"))
 body = resp.get_json()
@@ -446,6 +455,41 @@ sheets.get_user_history = lambda uid: _fixture
 client.post("/process", json=submit_body, headers={"X-Task-Secret": "s3cret"})
 check("task does not mutate the history it was given", len(_fixture) == 2)
 
+# Goal tasks.
+goal_writes: list = []
+sheets.set_goal = lambda uid, username, goal: goal_writes.append((uid, username, goal))
+sheets.clear_goal = lambda uid: True
+GOAL_TASK = {"kind": "goal_set", "token": "t", "user": USER, "username": "joe"}
+calls["edit"].clear()
+client.post("/process", json={**GOAL_TASK, "goal": 170}, headers={"X-Task-Secret": "s3cret"})
+check("goal_set writes the goal", goal_writes == [("42", "joe", 170.0)])
+check("goal_set confirms with the number", "170.0 lbs" in calls["edit"][-1][1]["content"])
+for bad in (-5, 0, "abc", None):
+    goal_writes.clear(); calls["edit"].clear()
+    client.post("/process", json={**GOAL_TASK, "goal": bad}, headers={"X-Task-Secret": "s3cret"})
+    check(f"goal_set rejects {bad!r}", goal_writes == [] and "⚠️" in calls["edit"][-1][1]["content"])
+calls["edit"].clear()
+client.post("/process", json={**GOAL_TASK, "kind": "goal_clear"}, headers={"X-Task-Secret": "s3cret"})
+check("goal_clear confirms", "cleared" in calls["edit"][-1][1]["content"])
+sheets.clear_goal = lambda uid: False
+calls["edit"].clear()
+client.post("/process", json={**GOAL_TASK, "kind": "goal_clear"}, headers={"X-Task-Secret": "s3cret"})
+check("goal_clear with nothing set says so", "don't have a goal" in calls["edit"][-1][1]["content"])
+
+# The check-in embed shows the goal line: starting 200 (prefill), current 185, goal 170.
+sheets.get_goal = lambda uid: 170.0
+calls["post"].clear()
+client.post("/process", json=submit_body, headers={"X-Task-Secret": "s3cret"})
+_goal_field = next((f for f in calls["post"][0][1]["embeds"][0]["fields"] if f["name"] == "🏁 Goal"), None)
+check("check-in embed shows goal progress",
+      _goal_field is not None and _goal_field["value"] == "170.0 lbs — 15.0 to go (50% there)", str(_goal_field))
+sheets.get_goal = _raise_sheets
+calls["post"].clear()
+resp = client.post("/process", json=submit_body, headers={"X-Task-Secret": "s3cret"})
+check("goal lookup failing → check-in still posts, no goal field",
+      resp.status_code == 200 and not any(f["name"] == "🏁 Goal" for f in calls["post"][0][1]["embeds"][0]["fields"]))
+sheets.get_goal = lambda uid: None
+
 # summary task
 sheets.get_latest_checkins = lambda limit=10: [
     {"Username": "joe", "Current Weight": "185", "Last Week Weight": 186.2, "Proud Of": "Ran", "Can Work On": "Sleep"},
@@ -491,6 +535,37 @@ field_names = [f["name"] for f in embed["fields"]]
 check("progress stats fields", {"🚀 Starting", "⚖️ Current", "Overall", "Pace", "Check-ins"} <= set(field_names))
 check("progress shows the streak",
       next(f for f in embed["fields"] if f["name"] == "🔥 Streak")["value"] == "13 wk (best 13)")
+check("progress without a goal → no goal fields", not {"🎯 Goal", "📅 Projected"} & set(field_names))
+
+
+def _progress_with_goal(goal_stub):
+    sheets.get_goal = goal_stub
+    calls["edit"].clear()
+    client.post("/process", json={"kind": "progress", "view": "all", "token": "t", "user": USER, "member_nick": None},
+                headers={"X-Task-Secret": "s3cret"})
+    _, p, buf = calls["edit"][0]
+    fields = {f["name"]: f["value"] for f in p["embeds"][0]["fields"]}
+    return fields, buf
+
+
+# fake_history: 200 → 186.8 over 12 weeks, pace ≈ −1.1 lbs/week.
+fields, buf = _progress_with_goal(lambda uid: 180.0)
+check("progress goal field", fields.get("🎯 Goal") == "180.0 lbs — 6.8 to go (66% there)", fields.get("🎯 Goal"))
+check("progress projects a date", "📅 Projected" in fields and "weeks at this pace" in fields["📅 Projected"], fields.get("📅 Projected"))
+_proj_date = datetime.strptime(fields["📅 Projected"].split(" (")[0], "%b %d, %Y").date()
+_days_out = (_proj_date - datetime.now(timezone.utc).date()).days
+check("projection lands ~6 weeks out", 35 <= _days_out <= 50, str(_days_out))
+check("chart still renders with a goal line", buf is not None and buf.getvalue()[:8] == b"\x89PNG\r\n\x1a\n")
+fields, _ = _progress_with_goal(lambda uid: 60.0)
+check("goal too far at this pace → no projection", "🎯 Goal" in fields and "📅 Projected" not in fields)
+fields, _ = _progress_with_goal(lambda uid: 250.0)
+check("goal in the wrong direction → shown, not projected",
+      fields.get("🎯 Goal") == "250.0 lbs — 63.2 to go (0% there)" and "📅 Projected" not in fields, fields.get("🎯 Goal"))
+fields, _ = _progress_with_goal(lambda uid: 190.0)
+check("goal already reached", fields.get("🎯 Goal") == "190.0 lbs — ✅ reached!" and "📅 Projected" not in fields)
+fields, buf = _progress_with_goal(_raise_sheets)
+check("goal lookup failing → chart still returned", "🎯 Goal" not in fields and buf is not None)
+sheets.get_goal = lambda uid: None
 
 # progress: 30d view via button — only recent points
 calls["edit"].clear()
@@ -657,10 +732,10 @@ import register_commands
 
 by_name = {c["name"]: c for c in register_commands.COMMANDS}
 check(
-    "8 commands registered",
+    "9 commands registered",
     sorted(by_name) == sorted(
         ["checkin", "summary", "progress", "history", "day1",
-         "collage", "howto", "photo-replace"]
+         "collage", "howto", "photo-replace", "goal"]
     ),
     str(sorted(by_name)),
 )
@@ -679,6 +754,11 @@ check("photo-replace date has autocomplete",
       and opt("photo-replace", "date").get("autocomplete") is True)
 check("photo-replace photo is attachment+required",
       opt("photo-replace", "photo")["type"] == 11 and opt("photo-replace", "photo")["required"] is True)
+check("goal has set/clear sub-commands",
+      [(o["name"], o["type"]) for o in by_name["goal"]["options"]] == [("set", 1), ("clear", 1)])
+_goal_weight = opt("goal", "set")["options"][0]
+check("goal set takes a required number",
+      _goal_weight["name"] == "weight" and _goal_weight["type"] == 10 and _goal_weight["required"] is True)
 
 # Drift guard: a command Discord knows about but app.py can't answer produces
 # "the application did not respond" in the channel, which is invisible here
@@ -1172,6 +1252,25 @@ resp = client.post("/process", json={"kind": "no-such-kind", "token": "tok-unkno
 check("unknown task kind → still 200", resp.status_code == 200)
 check("unknown task kind → user gets an answer",
       len(calls["edit"]) == 1 and "went wrong" in calls["edit"][-1][1]["content"])
+
+# ── Goal maths ─────────────────────────────────────────────────────────────────
+_gp = goals.progress(200, 185, 170)
+check("goals: losing toward a lower goal", _gp["direction"] == -1 and _gp["remaining"] == 15 and _gp["pct"] == 50 and not _gp["reached"])
+_gp = goals.progress(150, 160, 170)
+check("goals: gaining toward a higher goal", _gp["direction"] == 1 and _gp["remaining"] == 10 and _gp["pct"] == 50)
+check("goals: reached", goals.progress(200, 168, 170)["reached"] and goals.progress(200, 168, 170)["remaining"] == -2)
+check("goals: pct clamps when moving away", goals.progress(200, 210, 170)["pct"] == 0)
+check("goals: goal equal to start → None", goals.progress(200, 190, 200) is None)
+_today = datetime(2026, 10, 6).date()
+_pd, _pw = goals.projected_date(6.6, -1.1, -1, _today)
+check("goals: projection at pace", _pd == datetime(2026, 11, 17).date() and abs(_pw - 6.0) < 1e-9, f"{_pd} {_pw}")
+check("goals: no pace → None", goals.projected_date(10, None, -1, _today) is None)
+check("goals: wrong-sign pace → None", goals.projected_date(10, 0.5, -1, _today) is None)
+check("goals: already reached → None", goals.projected_date(0, -1.0, -1, _today) is None)
+check("goals: beyond two years → None", goals.projected_date(120, -1.0, -1, _today) is None)
+check("goals: describe", goals.describe(170, goals.progress(200, 185, 170)) == "170.0 lbs — 15.0 to go (50% there)")
+check("goals: describe reached", goals.describe(170, goals.progress(200, 165, 170)) == "170.0 lbs — ✅ reached!")
+check("goals: describe without progress", goals.describe(170, None) == "170.0 lbs")
 
 # ── Streaks: consecutive local weeks ───────────────────────────────────────────
 def _at(y, m, d, h=12):
