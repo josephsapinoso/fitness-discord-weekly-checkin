@@ -257,22 +257,30 @@ def _build_checkin_embed(
     starting: str,
     proud_of: str,
     can_work_on: str,
+    last_focus: str | None = None,
 ) -> dict:
     week_str = datetime.now(timezone.utc).strftime("Week of %B %d, %Y")
     total = _change_suffix(current, starting).strip()
+    fields = [
+        {"name": "⚖️ Current Weight", "value": f"{current}{_change_suffix(current, last_week)}", "inline": True},
+        {"name": "📅 Last Week", "value": last_week, "inline": True},
+        {"name": "🚀 Starting Weight", "value": starting, "inline": True},
+        {"name": "📊 Total Change", "value": f"{total} lbs" if total else "—", "inline": False},
+    ]
+    if last_focus:
+        # What they said they'd work on, right above what they're proud of —
+        # the accountability the weekly format is for.
+        fields.append({"name": "🔁 Last week's focus", "value": last_focus[:1024], "inline": False})
+    fields += [
+        {"name": "🌟 Proud of", "value": proud_of, "inline": False},
+        {"name": "🎯 Can Work On", "value": can_work_on, "inline": False},
+    ]
     return {
         "title": f"Weekly Check-in — {discord_api.display_name(user, member)}",
         "description": week_str,
         "color": discord_api.COLOR_GREEN,
         "thumbnail": {"url": discord_api.avatar_url(user)},
-        "fields": [
-            {"name": "⚖️ Current Weight", "value": f"{current}{_change_suffix(current, last_week)}", "inline": True},
-            {"name": "📅 Last Week", "value": last_week, "inline": True},
-            {"name": "🚀 Starting Weight", "value": starting, "inline": True},
-            {"name": "📊 Total Change", "value": f"{total} lbs" if total else "—", "inline": False},
-            {"name": "🌟 Proud of", "value": proud_of, "inline": False},
-            {"name": "🎯 Can Work On", "value": can_work_on, "inline": False},
-        ],
+        "fields": fields,
         "footer": {"text": "Keep it up! 💪"},
     }
 
@@ -318,7 +326,8 @@ def _build_howto_embed() -> dict:
                 "value": (
                     "⚖️ **Current weight**\n"
                     "📅 **Last week's weight** — filled in for you from your last check-in\n"
-                    "🌟 **Proud of** — a win from this week\n"
+                    "🌟 **Proud of** — a win from this week (the form reminds you what "
+                    "you said you'd work on)\n"
                     "🎯 **Can work on** — something for next week\n\n"
                     "*Your starting weight is remembered automatically — no need to type it.*"
                 ),
@@ -522,7 +531,28 @@ def _build_progress_payload(history: list[dict], view: str, user: dict, member: 
 
 
 # ── The check-in modal ─────────────────────────────────────────────────────────
-def _checkin_modal(last_week: str | None) -> dict:
+PROUD_PLACEHOLDER = "Something you accomplished this week"
+FOCUS_PREFIX = "Last week you wanted to work on: "
+
+
+def _focus_placeholder(last_focus: str | None) -> str:
+    """The Proud-of placeholder, echoing last week's "Can Work On" when there is one.
+
+    Closes the loop the form otherwise leaves open: each week asks for something to
+    work on, and nothing ever referred back to it. Discord caps a placeholder at 100
+    characters, so a long answer is cut with an ellipsis rather than rejected (an
+    oversize placeholder fails the whole modal — the user sees "did not respond").
+    """
+    text = " ".join((last_focus or "").split())
+    if not text:
+        return PROUD_PLACEHOLDER
+    full = FOCUS_PREFIX + text
+    if len(full) <= 100:
+        return full
+    return full[:99] + "…"
+
+
+def _checkin_modal(last_week: str | None, last_focus: str | None = None) -> dict:
     # Discord caps a modal at 5 components ("Between 1 and 5 (inclusive)"), and
     # the file upload below spends one of them. Starting Weight is therefore NOT
     # asked for — _task_checkin_submit reads it back out of the sheet, which is
@@ -571,7 +601,7 @@ def _checkin_modal(last_week: str | None) -> dict:
                 ),
                 text_input(
                     "proud_of", "Proud of 🌟",
-                    "Something you accomplished this week", paragraph=True, max_length=500,
+                    _focus_placeholder(last_focus), paragraph=True, max_length=500,
                 ),
                 text_input(
                     "can_work_on", "Can Work On 🎯",
@@ -713,12 +743,12 @@ def _handle_command(interaction: dict):
         # budget sized to whatever's left of Discord's 3s window — on a cold
         # start (most of the budget already gone) the modal opens immediately
         # without prefill rather than overrunning the deadline.
-        last_week = None
+        last_week = last_focus = None
         budget = _interaction_budget()
         if budget >= MIN_PREFILL_BUDGET_S:
             try:
                 future = _prefill_pool.submit(_prefill_last_week, user["id"])
-                _, last_week = future.result(timeout=budget)
+                _, last_week, last_focus = future.result(timeout=budget)
             except Exception as e:
                 log.warning("Prefill skipped: %s", e)
                 _note_prefill_skip(f"{type(e).__name__}: {e}")
@@ -727,7 +757,7 @@ def _handle_command(interaction: dict):
                 "Prefill skipped: only %.2fs of interaction budget left", budget
             )
             _note_prefill_skip(f"only {budget:.2f}s of interaction budget left")
-        return jsonify(_checkin_modal(last_week))
+        return jsonify(_checkin_modal(last_week, last_focus))
 
     if name == "summary":
         tasks_queue.enqueue(
@@ -1044,10 +1074,10 @@ def _task_checkin_submit(payload: dict) -> None:
     # mistaken for the first one. On a first-ever check-in there is nothing to
     # find, and today's weight is by definition the starting weight.
     try:
-        starting, _ = sheets.get_user_prefill(user["id"])
+        starting, _, last_focus = sheets.get_user_prefill(user["id"])
     except Exception as e:
         log.warning("Starting-weight lookup failed: %s", e)
-        starting = None
+        starting = last_focus = None
     starting = starting or v["current_weight"]
 
     sheets.log_checkin(
@@ -1067,6 +1097,7 @@ def _task_checkin_submit(payload: dict) -> None:
         starting=starting,
         proud_of=v["proud_of"],
         can_work_on=v["can_work_on"],
+        last_focus=last_focus,
     )
     # The text check-in always posts and confirms independently of any photo, so
     # a photo/compose failure can never lose the written check-in.

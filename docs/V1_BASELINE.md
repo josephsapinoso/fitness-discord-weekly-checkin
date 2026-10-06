@@ -50,6 +50,9 @@ top, one line per change, so a rollback's blast radius is readable at a glance:
 - **Admin alerts** (`ADMIN_USER_ID`, optional). A failed or unknown `/process` task, or a
   skipped `/checkin` prefill, DMs the admin. New task kind `admin_alert`. No schema change;
   v1 ignores the env var.
+- **Last week's focus.** `get_user_prefill` returns a third value (the latest "Can Work
+  On"); the `/checkin` form shows it as the Proud-of placeholder and the public embed gets a
+  "🔁 Last week's focus" field. Same single prefill read; no schema change.
 
 ---
 

@@ -126,7 +126,7 @@ resp = client.post("/interactions", data="{}", content_type="application/json")
 check("missing signature → 401", resp.status_code == 401)
 
 # ── 2. /checkin modal (with prefill) ──────────────────────────────────────────
-sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs")
+sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs", "Sleep more")
 resp = signed_post(cmd_interaction("checkin"))
 modal = resp.get_json()
 check("checkin → modal type 9", modal["type"] == 9)
@@ -148,6 +148,20 @@ check("starting weight not asked for", "starting_weight" not in inputs)
 check("prefill last week", inputs["last_week_weight"].get("value") == "190 lbs")
 check("current not prefilled", "value" not in inputs["current_weight"])
 check("paragraph styles", inputs["proud_of"]["style"] == 2 and inputs["can_work_on"]["style"] == 2)
+# Last week's "Can Work On" comes back as the Proud-of placeholder — from the
+# same single read as the weight prefill, so nothing is added to the 3s path.
+check(
+    "proud-of placeholder echoes last week's focus",
+    inputs["proud_of"]["placeholder"] == "Last week you wanted to work on: Sleep more",
+    inputs["proud_of"]["placeholder"],
+)
+_fp = app_module._focus_placeholder
+check("focus placeholder: none → default", _fp(None) == "Something you accomplished this week")
+check("focus placeholder: blank → default", _fp("   ") == "Something you accomplished this week")
+check("focus placeholder: newlines collapsed", _fp("sleep\nmore") == "Last week you wanted to work on: sleep more")
+check("focus placeholder: 67 chars fits exactly", len(_fp("a" * 67)) == 100 and not _fp("a" * 67).endswith("…"))
+check("focus placeholder: 68 chars is cut to 100", len(_fp("a" * 68)) == 100 and _fp("a" * 68).endswith("…"))
+check("focus placeholder: long text capped at 100", len(_fp("word " * 80)) == 100)
 photo_row = next(r for r in rows if r["component"]["type"] == 19)
 check(
     "photo upload component",
@@ -159,7 +173,7 @@ check(
 # Slow prefill: modal must still open (without values) inside the time budget
 def slow_prefill(uid):
     time.sleep(3)
-    return ("x", "y")
+    return ("x", "y", "z")
 
 sheets.get_user_prefill = slow_prefill
 t0 = time.time()
@@ -173,10 +187,12 @@ rows = {
 }
 check("slow prefill → modal within budget", modal["type"] == 9 and elapsed < 2.0, f"{elapsed:.2f}s")
 check("slow prefill → no values", "value" not in rows["last_week_weight"])
+check("slow prefill → default proud-of placeholder",
+      rows["proud_of"]["placeholder"] == "Something you accomplished this week")
 
 # Restore a fast stub: the checkin_submit task now calls get_user_prefill to
 # recover Starting Weight, so leaving slow_prefill bound would add 3s per task.
-sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs")
+sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs", "Sleep more")
 
 
 # Cold-start guard: a modal can't be deferred, so it must reach Discord inside
@@ -203,7 +219,7 @@ _calls = {"n": 0}
 
 def counting_prefill(uid):
     _calls["n"] += 1
-    return ("200 lbs", "190 lbs")
+    return ("200 lbs", "190 lbs", "Sleep more")
 
 
 sheets.get_user_prefill = counting_prefill
@@ -217,7 +233,9 @@ stale_rows = {
 check("cold start → modal still opens", modal["type"] == 9)
 check("cold start → prefill skipped, no value", "value" not in stale_rows["last_week_weight"])
 check("cold start → sheet not even read", _calls["n"] == 0)
-sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs")
+check("cold start → default proud-of placeholder",
+      stale_rows["proud_of"]["placeholder"] == "Something you accomplished this week")
+sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs", "Sleep more")
 
 # ── 3. Deferred commands enqueue tasks ─────────────────────────────────────────
 enqueued.clear()
@@ -336,6 +354,16 @@ weight_field = embed["fields"][0]
 check("weight change computed", "📉 -1.2" in weight_field["value"], weight_field["value"])
 total_field = next(f for f in embed["fields"] if f["name"] == "📊 Total Change")
 check("total change computed", total_field["value"] == "📉 -15.0 lbs", total_field["value"])
+_names = [f["name"] for f in embed["fields"]]
+check("last week's focus shown on the embed", "🔁 Last week's focus" in _names, str(_names))
+check(
+    "last week's focus sits right above Proud of",
+    _names.index("🔁 Last week's focus") + 1 == _names.index("🌟 Proud of"),
+)
+check(
+    "last week's focus carries last week's Can Work On",
+    next(f for f in embed["fields"] if f["name"] == "🔁 Last week's focus")["value"] == "Sleep more",
+)
 check("checkin ephemeral confirmed", calls["edit"][0][1]["content"].startswith("✅"))
 
 # First-ever check-in: nothing in the sheet to recover, so today's weight IS the
@@ -345,7 +373,7 @@ submit_body = {
     "values": {"current_weight": "185 lbs", "last_week_weight": "", "proud_of": "x", "can_work_on": "y"},
 }
 for label, stub, expected in [
-    ("first check-in", lambda uid: (None, None), "185 lbs"),
+    ("first check-in", lambda uid: (None, None, None), "185 lbs"),
     ("prefill raises", _raise_sheets, "185 lbs"),
 ]:
     logged.clear()
@@ -355,7 +383,9 @@ for label, stub, expected in [
     check(f"{label} → starting falls back to current", logged[0]["starting_weight"] == expected)
     total_field = next(f for f in calls["post"][-1][1]["embeds"][0]["fields"] if f["name"] == "📊 Total Change")
     check(f"{label} → total change is zero", total_field["value"] == "➡️ +0.0 lbs", total_field["value"])
-sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs")
+    check(f"{label} → no focus field",
+          not any(f["name"] == "🔁 Last week's focus" for f in calls["post"][-1][1]["embeds"][0]["fields"]))
+sheets.get_user_prefill = lambda uid: ("200 lbs", "190 lbs", "Sleep more")
 
 # summary task
 sheets.get_latest_checkins = lambda limit=10: [
