@@ -111,6 +111,20 @@ COMMANDS = [
         ],
     },
     {"name": "recap", "description": "Post last week's group recap now"},
+    {
+        "name": "start-weight",
+        "description": "Set your starting weight — what /progress and the recap measure from",
+        "options": [
+            {
+                "type": 10,  # number
+                "name": "weight",
+                "description": "Starting weight in lbs",
+                "required": True,
+                "min_value": 50,
+                "max_value": 1000,
+            }
+        ],
+    },
 ]
 
 

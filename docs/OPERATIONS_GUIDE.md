@@ -332,7 +332,7 @@ failure can never lose the written check-in. Check, in order:
 
 ### `/day1` doesn't appear in Discord
 
-Re-run `python register_commands.py` and confirm it prints **10** commands. This is the
+Re-run `python register_commands.py` and confirm it prints **11** commands. This is the
 easiest step to forget after deploying the photo feature. Global commands can take up to
 an hour to propagate.
 
@@ -467,6 +467,18 @@ Goal Weight | Set On`), auto-created on first use; the tab name is fixed, not an
 
 To change someone's goal by hand, edit the `Goal Weight` cell; the user id column is text
 (written `RAW`) and must stay that way.
+
+## Starting Weight
+
+The starting weight lives in the `Starting Weight` column of **every** `Check-ins` row. The
+bot reads it from a member's **first** row (check-in embed, `/progress`, the Monday recap)
+and each new check-in copies that first row's value forward. `/start-weight <weight>`
+rewrites the cell on all of the member's existing rows in one batch write — the one place
+the otherwise append-only tab is edited in place. A member with no check-ins yet is told to
+`/checkin` first, since there is no row to hold the value.
+
+To change it by hand instead, edit the `Starting Weight` cell on the member's earliest row
+(the later rows are copies; updating them too keeps the column tidy but isn't required).
 
 ## Extending the Bot
 

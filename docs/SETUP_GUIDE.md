@@ -179,7 +179,7 @@ The full first-time procedure lives in **[GCP_DEPLOY.md](GCP_DEPLOY.md)**. In ou
 4. `gcloud run deploy fitness-checkin-bot --source . --env-vars-file env.yaml ...`
 5. Set the **Interactions Endpoint URL** in the Discord Developer Portal to
    `https://YOUR-SERVICE-URL/interactions`. Discord validates it before saving.
-6. Register the slash commands: `python register_commands.py` (must print **10**).
+6. Register the slash commands: `python register_commands.py` (must print **11**).
 7. Create the Cloud Scheduler job that POSTs to `/reminder` every Monday.
 
 Steps 5 and 7 have no equivalent in a gateway bot — Discord needs to know where to send
@@ -206,6 +206,8 @@ one-time infrastructure and use [REDEPLOY_CHECKLIST.md](REDEPLOY_CHECKLIST.md) o
    check-in photo posts a Day 1 → Now composite. A `Photos` tab appears in the sheet.
 8. Type `/goal set 175` — `/progress` now shows how far along you are and, once the trend
    has a direction, a projected date. A `Goals` tab appears in the sheet.
+9. Type `/start-weight 215` — the `Starting Weight` cells on your `Check-ins` rows change
+   and `/progress` now shows **🚀 Starting 215.0 lbs**.
 
 > The bot appears **offline** in the Discord member list. That's expected and cosmetic —
 > with no gateway connection Discord never sees a presence for it. Commands work fine.
