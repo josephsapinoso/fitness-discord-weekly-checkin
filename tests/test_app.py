@@ -267,6 +267,12 @@ resp = signed_post(cmd_interaction("goal", [{"name": "clear", "type": 1}]))
 check("goal clear → deferred ephemeral", resp.get_json() == {"type": 5, "data": {"flags": 64}})
 check("goal clear enqueued", enqueued[-1][0]["kind"] == "goal_clear" and "goal" not in enqueued[-1][0])
 
+resp = signed_post(cmd_interaction("start-weight", [{"name": "weight", "type": 10, "value": 215}]))
+check("start-weight → deferred ephemeral", resp.get_json() == {"type": 5, "data": {"flags": 64}})
+check("start-weight enqueued with the weight",
+      enqueued[-1][0]["kind"] == "start_weight_set" and enqueued[-1][0]["weight"] == 215
+      and enqueued[-1][0]["username"] == "joe")
+
 resp = signed_post(cmd_interaction("history"))
 body = resp.get_json()
 check(
@@ -481,6 +487,33 @@ sheets.clear_goal = lambda uid: False
 calls["edit"].clear()
 client.post("/process", json={**GOAL_TASK, "kind": "goal_clear"}, headers={"X-Task-Secret": "s3cret"})
 check("goal_clear with nothing set says so", "don't have a goal" in calls["edit"][-1][1]["content"])
+
+# Starting-weight task: rewrites the user's rows, confirms with the number and count.
+start_writes: list = []
+_real_set_starting_weight = sheets.set_starting_weight
+sheets.set_starting_weight = lambda uid, weight: start_writes.append((uid, weight)) or 3
+START_TASK = {"kind": "start_weight_set", "token": "t", "user": USER, "username": "joe"}
+calls["edit"].clear()
+client.post("/process", json={**START_TASK, "weight": 215}, headers={"X-Task-Secret": "s3cret"})
+check("start_weight_set writes the weight", start_writes == [("42", 215.0)])
+check("start_weight_set confirms with the number and row count",
+      "215.0 lbs" in calls["edit"][-1][1]["content"] and "3 check-ins" in calls["edit"][-1][1]["content"],
+      calls["edit"][-1][1]["content"])
+for bad in (-5, 0, "abc", None):
+    start_writes.clear(); calls["edit"].clear()
+    client.post("/process", json={**START_TASK, "weight": bad}, headers={"X-Task-Secret": "s3cret"})
+    check(f"start_weight_set rejects {bad!r}", start_writes == [] and "⚠️" in calls["edit"][-1][1]["content"])
+sheets.set_starting_weight = lambda uid, weight: 0
+calls["edit"].clear()
+client.post("/process", json={**START_TASK, "weight": 215}, headers={"X-Task-Secret": "s3cret"})
+check("start_weight_set with no check-ins points at /checkin",
+      "/checkin" in calls["edit"][-1][1]["content"] and "215.0" not in calls["edit"][-1][1]["content"])
+sheets.set_starting_weight = lambda uid, weight: _raise_sheets(uid)
+calls["edit"].clear()
+resp = client.post("/process", json={**START_TASK, "weight": 215}, headers={"X-Task-Secret": "s3cret"})
+check("start_weight_set Sheets failure → 200 + error reply",
+      resp.status_code == 200 and "⚠️" in calls["edit"][-1][1]["content"])
+sheets.set_starting_weight = _real_set_starting_weight
 
 # The check-in embed shows the goal line: starting 200 (prefill), current 185, goal 170.
 sheets.get_goal = lambda uid: 170.0
@@ -830,10 +863,10 @@ import register_commands
 
 by_name = {c["name"]: c for c in register_commands.COMMANDS}
 check(
-    "10 commands registered",
+    "11 commands registered",
     sorted(by_name) == sorted(
         ["checkin", "summary", "progress", "history", "day1",
-         "collage", "howto", "photo-replace", "goal", "recap"]
+         "collage", "howto", "photo-replace", "goal", "recap", "start-weight"]
     ),
     str(sorted(by_name)),
 )
@@ -857,6 +890,9 @@ check("goal has set/clear sub-commands",
 _goal_weight = opt("goal", "set")["options"][0]
 check("goal set takes a required number",
       _goal_weight["name"] == "weight" and _goal_weight["type"] == 10 and _goal_weight["required"] is True)
+_start_weight = opt("start-weight", "weight")
+check("start-weight takes a required number with a floor",
+      _start_weight["type"] == 10 and _start_weight["required"] is True and _start_weight["min_value"] == 50)
 
 # Drift guard: a command Discord knows about but app.py can't answer produces
 # "the application did not respond" in the channel, which is invisible here
@@ -874,8 +910,9 @@ _count = len(register_commands.COMMANDS)
 for _doc in ("TODO.md", "docs/REDEPLOY_CHECKLIST.md", "docs/OPERATIONS_GUIDE.md",
              "docs/SETUP_GUIDE.md", "scripts/redeploy.sh"):
     _txt = open(os.path.join(ROOT, *_doc.split("/")), encoding="utf-8").read()
+    # Whole numbers only: "11 commands" must not read as a stale "1 commands".
     _stale = [n for n in range(1, 21) if n != _count
-              and (f"**{n}** commands" in _txt or f"{n} commands" in _txt
+              and (re.search(rf"(?<!\d)\*?\*?{n}\*?\*? commands", _txt)
                    or f"(must print **{n}**)" in _txt)]
     check(f"{_doc} states the real command count", not _stale, f"claims {_stale}, is {_count}")
 
@@ -1679,6 +1716,40 @@ _reminder = app_module._reminder_embed()["description"]
 check("reminder drops starting weight", "Starting weight" not in _reminder)
 check("reminder mentions optional photo", "progress photo" in _reminder.lower())
 
+
+# ── set_starting_weight rewrites only the caller's rows, in one batch ──────────
+class _StartWS:
+    def __init__(self, records):
+        self.records = records
+        self.batches = []
+
+    def get_all_records(self):
+        return self.records
+
+    def batch_update(self, data, value_input_option=None):
+        self.batches.append((data, value_input_option))
+
+
+_start_ws = _StartWS([
+    {"User ID": 42, "Starting Weight": "200 lbs"},   # sheet row 2
+    {"User ID": 7, "Starting Weight": "150"},        # sheet row 3
+    {"User ID": "42", "Starting Weight": "200 lbs"}, # sheet row 4
+])
+_orig_get_sheet = sheets._get_sheet
+sheets._get_sheet = lambda: _start_ws
+_start_col = chr(65 + sheets.HEADERS.index("Starting Weight"))
+check("set_starting_weight returns the row count", sheets.set_starting_weight(42, 215) == 2)
+check("set_starting_weight addresses only the user's rows, in the Starting Weight column",
+      len(_start_ws.batches) == 1
+      and [d["range"] for d in _start_ws.batches[0][0]] == [f"{_start_col}2", f"{_start_col}4"],
+      str(_start_ws.batches))
+check("set_starting_weight writes the value to one decimal, USER_ENTERED",
+      all(d["values"] == [["215.0"]] for d in _start_ws.batches[0][0])
+      and _start_ws.batches[0][1] == "USER_ENTERED")
+_start_ws.batches.clear()
+check("set_starting_weight with no rows → 0 and no write",
+      sheets.set_starting_weight(99, 215) == 0 and _start_ws.batches == [])
+sheets._get_sheet = _orig_get_sheet
 
 # ── Sheets handles are opened once per process ─────────────────────────────────
 # Re-opening a tab on every call cost ~0.7s of auth + metadata round trips, so a

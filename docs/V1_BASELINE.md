@@ -69,6 +69,10 @@ top, one line per change, so a rollback's blast radius is readable at a glance:
 - **`/progress` uses the recorded Starting Weight.** `get_user_history` rows carry
   `starting`; `compute_stats` prefers it over the first logged weigh-in, so Overall and the
   goal percentage agree with the check-in embed's Total Change.
+- **`/start-weight <weight>`** (task kind `start_weight_set`, `sheets.set_starting_weight`).
+  Rewrites the Starting Weight cell on all of the caller's Check-ins rows in one batch write —
+  the one in-place edit to that tab; row and column positions are untouched, so rollbacks
+  are unaffected. 11 commands. No schema change.
 
 ---
 

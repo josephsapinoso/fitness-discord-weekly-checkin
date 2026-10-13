@@ -17,6 +17,7 @@ free tier ($0/month)** as a Discord HTTP interactions endpoint — no always-on 
 - `/summary` — shows the last 5 check-ins in an embed with a link to the full sheet
 - `/progress` — your personal weight chart with All-Time / 6-Month / 30-Day buttons, overall loss, and pace (lbs/week trend); private by default, `share:true` posts it to the channel
 - `/goal set <weight>` / `/goal clear` — your target weight; `/progress` shows lbs to go, % of the way, a projected date at your current pace, and a gold goal line on the chart
+- `/start-weight <weight>` — reset your starting weight (e.g. what you weighed before the bot existed); Total Change, `/progress` and the recap measure from it
 - `/history` — sends you the Google Sheet link privately
 - `/collage` — a grid of your archived progress photos over time
 - `/photo-replace` — swap the photo stored for a given date (with autocomplete)

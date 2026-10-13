@@ -360,7 +360,8 @@ def _build_howto_embed() -> dict:
                     "🌟 **Proud of** — a win from this week (the form reminds you what "
                     "you said you'd work on)\n"
                     "🎯 **Can work on** — something for next week\n\n"
-                    "*Your starting weight is remembered automatically — no need to type it.*"
+                    "*Your starting weight is remembered automatically — no need to type it. "
+                    "Started before the bot? `/start-weight` resets it.*"
                 ),
             },
             {
@@ -949,6 +950,20 @@ def _handle_command(interaction: dict):
         tasks_queue.enqueue(task, _self_url())
         return jsonify({"type": DEFERRED_CHANNEL_MESSAGE, "data": {"flags": EPHEMERAL}})
 
+    if name == "start-weight":
+        options = {o["name"]: o.get("value") for o in interaction["data"].get("options", [])}
+        tasks_queue.enqueue(
+            {
+                "kind": "start_weight_set",
+                "token": interaction["token"],
+                "user": user,
+                "username": _username(user),
+                "weight": options.get("weight"),
+            },
+            _self_url(),
+        )
+        return jsonify({"type": DEFERRED_CHANNEL_MESSAGE, "data": {"flags": EPHEMERAL}})
+
     if name == "history":
         import sheets
 
@@ -1160,6 +1175,8 @@ def process_task():
             _task_goal_set(payload)
         elif kind == "goal_clear":
             _task_goal_clear(payload)
+        elif kind == "start_weight_set":
+            _task_start_weight_set(payload)
         elif kind == "weekly_recap":
             _task_weekly_recap(payload)
         else:
@@ -1795,6 +1812,42 @@ def _task_goal_clear(payload: dict) -> None:
     _reply(payload["token"], user, {
         "content": "🎯 Goal cleared." if had
         else "You don't have a goal set — `/goal set <weight>` to add one."
+    })
+
+
+def _task_start_weight_set(payload: dict) -> None:
+    """Rewrite the user's recorded Starting Weight (every check-in row at once).
+
+    For a member who started before the bot existed — or whose first check-in
+    simply wasn't their real starting point — this is the only way to make
+    Total Change, /progress and the recap measure from the right number.
+    """
+    import sheets
+
+    user = payload["user"]
+    try:
+        weight = float(payload.get("weight"))
+    except (TypeError, ValueError):
+        weight = math.nan
+    if not math.isfinite(weight) or weight <= 0:
+        _reply(payload["token"], user,
+               {"content": "⚠️ That doesn't look like a weight. Try `/start-weight 215`."})
+        return
+    updated = sheets.set_starting_weight(user["id"], weight)
+    if updated == 0:
+        _reply(payload["token"], user, {
+            "content": (
+                "You haven't checked in yet — your first `/checkin` records your "
+                "starting weight. Run `/start-weight` after that to change it."
+            )
+        })
+        return
+    _reply(payload["token"], user, {
+        "content": (
+            f"🚀 Starting weight set to **{weight:.1f} lbs** (updated {updated} "
+            f"check-in{'s' if updated != 1 else ''}). `/progress`, the Monday recap and "
+            "your next check-in now measure from it."
+        )
     })
 
 

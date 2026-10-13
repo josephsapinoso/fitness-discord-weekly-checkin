@@ -4,6 +4,9 @@ Google Sheets storage for fitness check-ins.
 Sheet columns: timestamp, user_id, username, current_weight, last_week_weight,
                starting_weight, proud_of, can_work_on
 
+The Check-ins tab is append-only with one exception: /start-weight rewrites the
+Starting Weight cell on a user's existing rows in place (see set_starting_weight).
+
 Credentials are resolved in this order:
   1. GOOGLE_CREDENTIALS_JSON env var (full service-account JSON — recommended)
   2. GOOGLE_CREDENTIALS_FILE path (local development)
@@ -20,6 +23,7 @@ from datetime import datetime, timezone
 
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.utils import rowcol_to_a1
 
 log = logging.getLogger(__name__)
 
@@ -418,6 +422,38 @@ def get_user_prefill(user_id: int) -> tuple[str | None, str | None, str | None]:
     last_week = _clean(latest.get("Current Weight", ""))
     last_focus = _clean(latest.get("Can Work On", ""))
     return starting, last_week, last_focus
+
+
+def set_starting_weight(user_id: int, weight: float) -> int:
+    """Overwrite the Starting Weight on every one of a user's check-in rows.
+
+    Every reader (the check-in embed via get_user_prefill, /progress via
+    get_user_history, the recap via get_all_checkins) takes the starting weight
+    from the user's FIRST row, and each new check-in copies that first row's
+    value forward — so rewriting the existing rows is all it takes for the new
+    value to stick. Every row is rewritten, not just the first, so the column
+    stays self-consistent. One batch write, however many rows.
+
+    Returns the number of rows updated; 0 means the user has never checked in
+    (there is no row to carry the value yet).
+    """
+    ws = _get_sheet()
+    rows = [
+        i + 2  # +2: one for the header row, one for gspread's 1-based indexing
+        for i, r in enumerate(ws.get_all_records())
+        if str(r.get("User ID")) == str(user_id)
+    ]
+    if not rows:
+        return 0
+    col = HEADERS.index("Starting Weight") + 1
+    ws.batch_update(
+        [
+            {"range": rowcol_to_a1(row, col), "values": [[f"{weight:.1f}"]]}
+            for row in rows
+        ],
+        value_input_option="USER_ENTERED",
+    )
+    return len(rows)
 
 
 def parse_weight(value) -> float | None:
